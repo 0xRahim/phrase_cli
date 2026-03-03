@@ -1,4 +1,5 @@
 use clap::{Parser, builder::Str};
+use core::Commands;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -20,30 +21,17 @@ fn main() {
         "vault" =>{
             match args.actiom.as_str() {
                 "new" =>{
-                    println!("Adding a new vault");
-                    println!("phrase vault new {}", args.value);
-
-
+                    Commands::vault::new(&args.value);
                 },
                 "list" =>{
-                    println!("Listing all vaults");
-                    println!("phrase vault list");
-
+                    Commands::vault::list();
                 },
                 "rm" =>{
-                    println!("Removing a vault");
-                    println!("phrase vault rm {}", args.value);
+                    Commands::vault::rm(&args.value);
 
                 },
                 "use" =>{
-                    println!("Using a vault");
-                    println!("phrase vault use {}", args.value);
-
-                },
-                "edit" =>{
-                    println!("Editing a vault");
-                    println!("phrase vault edit {}", args.value)
-
+                    Commands::vault::use_(&args.value);
                 },
                 _ =>{
 
@@ -53,32 +41,18 @@ fn main() {
         "category" =>{
             match args.actiom.as_str() {
                 "new" =>{
-                    println!("Adding a new category");
-                    println!("phrase category new {}", args.value);
+                    Commands::category::new(&args.value);
 
                 },
                 "list" =>{
-                    println!("Listing all categories");
-                    println!("phrase category list");
-
-
-
+                    Commands::category::list();
                 },
                 "rm" =>{
-                    println!("Removing a category");
-                    println!("phrase category rm {}", args.value);
+                    Commands::category::rm(&args.value);
 
                 },
                 "use" =>{
-                    println!("Using a category");
-                    println!("phrase category use {}", args.value);
-
-
-                },
-                "edit" =>{
-                    println!("Editing a category");
-                    println!("phrase category edit {}", args.value);
-
+                    Commands::category::use_(&args.value);
                 },
                 _ =>{
 
@@ -90,35 +64,20 @@ fn main() {
             let cateory = args.category.unwrap_or_default();
             match args.actiom.as_str() {
                 "new" =>{
-                    println!("Adding a new entry");
-                    println!("phrase cred new {} --category {}", args.value, cateory);
+                    Commands::entry::new(&args.value, &cateory);
                 },
                 "list" =>{
-                    println!("Listing all entries");
-                    println!("phrase cred list --category {}", cateory);
+                    Commands::entry::list(&cateory);
 
                 },
                 "rm" =>{
-                    println!("Removing an entry");
-                    println!("phrase cred rm {} --category {}", args.value, cateory);
-
-                },
-                "use" =>{
-                    println!("Using an entry");
-                    println!("phrase cred use {} --category {}", args.value, cateory);
-
-
+                    Commands::entry::rm(&args.value, &cateory);
                 },
                 "edit" =>{
-                    println!("Editing an entry");
-                    println!("phrase cred edit {} --category {}", args.value, cateory);
-
-
+                    Commands::entry::edit(&args.value, &cateory);
                 },
                 "get" =>{
-                    println!("Getting an entry");
-                    println!("phrase cred get {} --category {}", args.value, cateory);
-
+                    Commands::entry::get(&args.value, &cateory);
                 },
                 _ =>{
 
