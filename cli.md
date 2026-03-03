@@ -36,6 +36,9 @@ phrase entry new gmail
 # Get an entry
 phrase entry get gmail
 
+# List entries in the active vault
+phrase entry list 
+
 # Edit an entry
 phrase entry edit gmail
 
@@ -45,4 +48,6 @@ phrase entry rm gmail
 # Optional override if not in active category
 phrase entry new github --category work
 phrase entry get github --category work
+phrase entry list --category work
+
 ```
