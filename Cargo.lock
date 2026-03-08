@@ -438,6 +438,7 @@ checksum = "fd121741cf3eb82c08dd3023eb55bf2665e5f60ec20f89760cf836ae4562e6a0"
 name = "crypto"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "pgp",
  "rand",
 ]

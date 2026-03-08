@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 pgp = "0.17.0"
 rand = "0.8"
+aes-gcm = "0.10"
