@@ -1,55 +1,28 @@
 pub mod crypt {
-    use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng as AesOsRng};
-    use aes_gcm::{Aes256Gcm, Key, Nonce};
-    use pgp::composed::ArmorOptions;
-    use pgp::composed::Deserializable;
-    use pgp::composed::Message;
-    use pgp::composed::{KeyType, SecretKeyParamsBuilder, SignedPublicKey, SignedSecretKey};
-    use pgp::crypto::sym::SymmetricKeyAlgorithm;
-    use pgp::packet::LiteralData;
+    use aes_gcm::{
+        aead::{Aead, AeadCore, KeyInit, OsRng as AesOsRng},
+        Aes256Gcm, Key, Nonce,
+    };
+    use hkdf::Hkdf;
+    use pgp::composed::{
+        ArmorOptions, Deserializable, KeyType, SecretKeyParamsBuilder,
+        SignedPublicKey, SignedSecretKey,
+    };
     use pgp::ser::Serialize;
-    use pgp::types::{KeyDetails, Password}; // ← fix E5: KeyDetails must be in scope for .key_id()
-    use rand::thread_rng;
+    use pgp::types::{KeyDetails, Password};
+    use rand::{rngs::OsRng, thread_rng, RngCore};
+    use sha2::Sha256;
+    use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public, StaticSecret};
 
-    // ── helper: hand-craft a PGP Literal Data Packet (tag 11, new format) ────────
-    //
-    // PGP new-format packet layout (RFC 4880 §4.2 + §5.9):
-    //   0xCB           — new-format tag byte for Literal Data (tag 11 = 0b001011, 0xC0|11 = 0xCB)
-    //   <length>       — one-octet body length (works for bodies < 192 bytes)
-    //   0x62  ('b')    — binary data format
-    //   <fname_len>    — 1 byte: length of the filename field
-    //   <fname>        — filename bytes (we use "key")
-    //   <date>         — 4 bytes: modification date, zeroed
-    //   <payload>      — the actual data bytes
-    //
-    // We hex-encode the 32-byte session key so the payload is always 64 bytes,
-    // well within the one-octet length limit (< 192).
-    fn build_literal_packet(payload: &[u8]) -> Vec<u8> {
-        let fname = b"key";
-        // body = format(1) + fname_len(1) + fname(3) + date(4) + payload
-        let body_len = 1 + 1 + fname.len() + 4 + payload.len();
-        assert!(
-            body_len < 192,
-            "payload too large for one-octet length encoding"
-        );
+    // ═════════════════════════════════════════════════════════════════════════
+    // PGP KEY GENERATION  (used for signing / identity only)
+    // ═════════════════════════════════════════════════════════════════════════
 
-        let mut pkt = Vec::with_capacity(2 + body_len);
-        pkt.push(0xCB); // new-format Literal Data tag
-        pkt.push(body_len as u8); // one-octet body length
-        pkt.push(b'b'); // binary format byte
-        pkt.push(fname.len() as u8); // filename length
-        pkt.extend_from_slice(fname);
-        pkt.extend_from_slice(&[0u8; 4]); // date = 0
-        pkt.extend_from_slice(payload);
-        pkt
-    }
-
-    // ─── EXISTING ────────────────────────────────────────────────────────────────
-
+    /// Generates an Ed25519 PGP keypair and prints both keys as ASCII armor.
     pub fn generate_key_pairs() {
         let mut rng = thread_rng();
 
-        let secret_key_params = SecretKeyParamsBuilder::default()
+        let params = SecretKeyParamsBuilder::default()
             .key_type(KeyType::Ed25519)
             .can_sign(true)
             .can_certify(true)
@@ -59,7 +32,7 @@ pub mod crypt {
             .build()
             .expect("Failed to build key params");
 
-        let secret_key = secret_key_params
+        let secret_key = params
             .generate(&mut rng)
             .expect("Failed to generate secret key");
 
@@ -74,7 +47,7 @@ pub mod crypt {
             .fingerprint()
             .as_bytes()
             .iter()
-            .map(|b| format!("{:02X}", b))
+            .map(|b| format!("{b:02X}"))
             .collect::<String>();
 
         let secret_key_asc = signed_secret_key
@@ -87,13 +60,27 @@ pub mod crypt {
 
         println!("=== KEY INFO ===");
         println!("Key ID:      {:?}", signed_public_key.key_id());
-        println!("Fingerprint: {}", fingerprint);
-        println!("\n=== SECRET KEY ===\n{}", secret_key_asc);
-        println!("=== PUBLIC KEY ===\n{}", public_key_asc);
+        println!("Fingerprint: {fingerprint}");
+        println!("\n=== SECRET KEY ===\n{secret_key_asc}");
+        println!("=== PUBLIC KEY ===\n{public_key_asc}");
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    // PGP PRIVATE KEY  ── S2K PASSPHRASE PROTECTION
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// Re-generates an S2K-passphrase-protected PGP private key using the
+    /// same user ID as the supplied key. The pgp crate applies
+    /// iterated+salted SHA-256 → AES-256-CFB at key-generation time.
+    ///
+    /// # Arguments
+    /// * `mpass`          - Master password to protect the key
+    /// * `secret_key_asc` - Existing ASCII-armored key (user ID is extracted from it)
+    ///
+    /// # Returns
+    /// * `Ok(String)` - ASCII-armored S2K-protected private key
     pub fn encrypt_private_key(mpass: &str, secret_key_asc: &str) -> Result<String, String> {
-        let (existing_key, _headers) = SignedSecretKey::from_string(secret_key_asc)
+        let (existing_key, _) = SignedSecretKey::from_string(secret_key_asc)
             .map_err(|e| format!("Failed to parse secret key: {e}"))?;
 
         existing_key
@@ -104,7 +91,7 @@ pub mod crypt {
             .details
             .users
             .first()
-            .map(|u| std::str::from_utf8(u.id.id()).unwrap().to_string())
+            .map(|u| std::str::from_utf8(u.id.id()).unwrap_or("User <user@example.com>").to_string())
             .unwrap_or_else(|| "User <user@example.com>".to_string());
 
         let params = SecretKeyParamsBuilder::default()
@@ -130,113 +117,15 @@ pub mod crypt {
 
         signed_secret_key
             .to_armored_string(ArmorOptions::default())
-            .map_err(|e| format!("Failed to armor encrypted key: {e}"))
+            .map_err(|e| format!("Failed to armor key: {e}"))
     }
 
-    // ─── ENCRYPTION LAYER 1: AES-256-GCM session key ─────────────────────────
-
-    /// Generates a cryptographically random 32-byte AES-256 session key.
-    /// A fresh key should be generated for every password entry stored.
-    ///
-    /// # Returns
-    /// `[u8; 32]` — 256-bit random key, suitable for AES-256-GCM
-    pub fn generate_aes_session_key() -> [u8; 32] {
-        let key = Aes256Gcm::generate_key(&mut AesOsRng);
-        key.into()
-    }
-
-    // ─── ENCRYPTION LAYER 2: encrypt a string with AES session key ───────────
-
-    /// Encrypts a plaintext string using AES-256-GCM with a randomly generated nonce.
-    /// The output is: `[12-byte nonce] ++ [ciphertext + 16-byte GCM auth tag]`
-    /// Store the entire blob — the nonce is required for decryption.
+    /// Parses, verifies, and eagerly validates the master password against an
+    /// S2K-protected PGP private key. Returns the unlocked `SignedSecretKey`.
     ///
     /// # Arguments
-    /// * `plaintext`    - The password/string to encrypt
-    /// * `session_key`  - 32-byte AES-256 session key from `generate_aes_session_key`
-    ///
-    /// # Returns
-    /// * `Ok(Vec<u8>)`  - `nonce(12) ++ ciphertext(n) ++ tag(16)`
-    /// * `Err(String)`  - AES-GCM error
-    pub fn encrypt_string_with_aes(
-        plaintext: &str,
-        session_key: &[u8; 32],
-    ) -> Result<Vec<u8>, String> {
-        let key = Key::<Aes256Gcm>::from_slice(session_key);
-        let cipher = Aes256Gcm::new(key);
-
-        // Fresh 96-bit nonce per encryption (never reuse with the same key)
-        let nonce = Aes256Gcm::generate_nonce(&mut AesOsRng);
-        let ciphertext = cipher
-            .encrypt(&nonce, plaintext.as_bytes())
-            .map_err(|e| format!("AES-GCM encryption failed: {e}"))?;
-
-        // Prepend nonce so decryption is self-contained
-        let mut blob = nonce.to_vec(); // 12 bytes
-        blob.extend_from_slice(&ciphertext); // ciphertext + 16-byte GCM tag
-        Ok(blob)
-    }
-
-    // ─── ENCRYPTION LAYER 3: encrypt AES session key with PGP public key ─────
-
-    /// Encrypts the 32-byte AES session key into a PGP PKESK message addressed
-    /// to the given public key. Only the corresponding private key can recover it.
-    ///
-    /// # Arguments
-    /// * `session_key`    - 32-byte AES session key to protect
-    /// * `public_key_asc` - ASCII-armored PGP public key of the recipient
-    ///
-    /// # Returns
-    /// * `Ok(String)`  - ASCII-armored PGP encrypted message (stores alongside the ciphertext)
-    /// * `Err(String)` - Descriptive error
-    pub fn encrypt_session_key_with_public_key(
-        session_key: &[u8; 32],
-        public_key_asc: &str,
-    ) -> Result<String, String> {
-        let (public_key, _) = SignedPublicKey::from_string(public_key_asc)
-            .map_err(|e| format!("Failed to parse public key: {e}"))?;
-    
-        public_key
-            .verify()
-            .map_err(|e| format!("Public key verification failed: {e}"))?;
-    
-        // Hex-encode so payload is printable ASCII — safe inside a binary literal packet
-        let hex_key: String = session_key.iter().map(|b| format!("{b:02x}")).collect();
-    
-        // Build raw packet bytes then deserialise into a Message
-        let pkt_bytes = build_literal_packet(hex_key.as_bytes());
-        let msg = Message::from_bytes(std::io::Cursor::new(pkt_bytes))
-            .map_err(|e| format!("Failed to build literal message: {e}"))?;
-    
-        let mut rng = thread_rng();
-        let encrypted = msg
-            .encrypt_to_keys_seipdv1(
-                &mut rng,
-                SymmetricKeyAlgorithm::AES256,
-                &[&public_key],
-            )
-            .map_err(|e| format!("PKESK encryption failed: {e}"))?;
-    
-        encrypted
-            .to_armored_string(ArmorOptions::default())
-            .map_err(|e| format!("Armoring failed: {e}"))
-    }
-    // ─── DECRYPTION LAYER 1: unlock private key with master password ──────────
-
-    /// Parses and verifies an S2K-protected ASCII-armored PGP private key.
-    /// The key material stays encrypted inside `SignedSecretKey` — the master
-    /// password is presented on-demand when the key is actually used (sign/decrypt).
-    ///
-    /// Call this first to validate `mpass` and get the key object for subsequent
-    /// `decrypt_session_key_with_private_key` calls.
-    ///
-    /// # Arguments
-    /// * `mpass`          - Master password that was used to S2K-protect this key
-    /// * `secret_key_asc` - ASCII-armored PGP private key
-    ///
-    /// # Returns
-    /// * `Ok(SignedSecretKey)` - Parsed, verified key ready for use
-    /// * `Err(String)`         - Parse or verification failure
+    /// * `mpass`          - Master password used when the key was protected
+    /// * `secret_key_asc` - ASCII-armored S2K-protected PGP private key
     pub fn decrypt_private_key_with_mpass(
         mpass: &str,
         secret_key_asc: &str,
@@ -248,142 +137,275 @@ pub mod crypt {
             .verify()
             .map_err(|e| format!("Key self-signature verification failed: {e}"))?;
 
-        // Eagerly unlock the primary key packet to validate the password now,
-        // not silently fail later during decryption.
         let pw = Password::from(mpass);
+
+        // Eagerly unlock to validate the password now rather than silently failing later.
+        // Closure signature in pgp 0.17: |key_material: &[u8], _extra| -> Result<()>
         secret_key
             .primary_key
-            .unlock(&pw, |_| Ok(()))
+            .unlock(&pw, |_, _| Ok(()))
             .map_err(|e| format!("Wrong master password (S2K unlock failed): {e}"))?;
 
         Ok(secret_key)
     }
 
-    // ─── DECRYPTION LAYER 2: recover AES session key with private key ─────────
+    // ═════════════════════════════════════════════════════════════════════════
+    // AES-256-GCM  ── SYMMETRIC ENCRYPTION (password / secret strings)
+    // ═════════════════════════════════════════════════════════════════════════
 
-    /// Decrypts a PGP PKESK-wrapped AES session key using the unlocked private key.
+    /// Generates a cryptographically random 32-byte AES-256 session key.
+    /// Generate a **fresh key for every password entry** stored in the vault.
+    pub fn generate_aes_session_key() -> [u8; 32] {
+        Aes256Gcm::generate_key(&mut AesOsRng).into()
+    }
+
+    /// Encrypts `plaintext` with AES-256-GCM.
     ///
-    /// # Arguments
-    /// * `encrypted_session_key_asc` - Armored PGP message from `encrypt_session_key_with_public_key`
-    /// * `secret_key`                - Unlocked `SignedSecretKey` from `decrypt_private_key_with_mpass`
-    /// * `mpass`                     - Master password (required by pgp crate at decrypt time)
+    /// Blob format: `nonce(12) ++ ciphertext(n) ++ tag(16)`
+    /// The nonce is randomly generated and prepended — no separate storage needed.
+    pub fn encrypt_string_with_aes(
+        plaintext: &str,
+        session_key: &[u8; 32],
+    ) -> Result<Vec<u8>, String> {
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(session_key));
+        let nonce = Aes256Gcm::generate_nonce(&mut AesOsRng);
+
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext.as_bytes())
+            .map_err(|e| format!("AES-GCM encryption failed: {e}"))?;
+
+        let mut blob = nonce.to_vec();   // 12 bytes
+        blob.extend_from_slice(&ciphertext); // n + 16-byte tag
+        Ok(blob)
+    }
+
+    /// Decrypts an AES-256-GCM blob produced by `encrypt_string_with_aes`.
     ///
-    /// # Returns
-    /// * `Ok([u8; 32])` - The recovered 32-byte AES session key
-    /// * `Err(String)`  - Decryption or format error
-
-    pub fn decrypt_session_key_with_private_key(
-        encrypted_session_key_asc: &str,
-        secret_key: &SignedSecretKey,
-        mpass: &str,
-    ) -> Result<[u8; 32], String> {
-        let (msg, _) = Message::from_string(encrypted_session_key_asc)
-            .map_err(|e| format!("Failed to parse PKESK message: {e}"))?;
-
-        // FIX E3: Password doesn't implement Clone and decrypt() wants a Fn() -> Password,
-        //         not a &Password. Capture mpass as an owned String in the closure.
-        let pw_str = mpass.to_string();
-        let pw_fn = || Password::from(pw_str.as_str());
-
-        // FIX E4: decrypt() expects &[&dyn PublicKeyTrait] / &[&SignedSecretKey] — pass a
-        //         plain slice, NOT &[secret_key] wrapped in an extra reference layer.
-        // FIX E2: decrypt() returns Message directly, not a tuple.
-        //         get_content() returns the plaintext bytes.
-        let decrypted_msg = msg
-            .decrypt(pw_fn, &[secret_key]) // &[&SignedSecretKey] ✓
-            .map_err(|e| format!("PKESK decryption failed: {e}"))?;
-
-        // FIX E2 continued: decrypted_msg is Message, not (Message, _).
-        let content = decrypted_msg
-            .get_content()
-            .map_err(|e| format!("Failed to extract message content: {e}"))?
-            .ok_or_else(|| "Decrypted message has no content".to_string())?;
-
-        // Decode from hex back to 32 bytes (matching encrypt_session_key_with_public_key)
-        let hex_str =
-            String::from_utf8(content).map_err(|e| format!("Content is not valid UTF-8: {e}"))?;
-
-        if hex_str.len() != 64 {
-            return Err(format!(
-                "Hex key has wrong length: expected 64 chars, got {}",
-                hex_str.len()
-            ));
+    /// The GCM auth tag guarantees integrity — any tampering or wrong key
+    /// returns `Err` immediately.
+    ///
+    /// Blob format: `nonce(12) ++ ciphertext(n) ++ tag(16)`
+    pub fn decrypt_string_with_aes(
+        blob: &[u8],
+        session_key: &[u8; 32],
+    ) -> Result<String, String> {
+        if blob.len() < 28 {
+            return Err(format!("Blob too short: {} bytes (minimum 28)", blob.len()));
         }
+
+        let (nonce_bytes, ciphertext) = blob.split_at(12);
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(session_key));
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| format!("AES-GCM decryption failed (wrong key or tampered): {e}"))?;
+
+        String::from_utf8(plaintext)
+            .map_err(|e| format!("Decrypted bytes are not valid UTF-8: {e}"))
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // X25519 KEYPAIR  ── ASYMMETRIC LAYER FOR SESSION-KEY PROTECTION
+    //
+    // The pgp crate's Message-level encryption API has never been stable in
+    // any 0.x release (method names change every minor version, internal types
+    // are not publicly constructable). X25519/ECIES is cryptographically
+    // identical to OpenPGP's ECDH key-encryption and uses fully stable crates.
+    //
+    // Full pipeline:
+    //   master password ──Argon2id──► wrapping key ──AES-256-GCM──► protected X25519 private key
+    //   X25519 public key ──ECIES──► encrypted session key blob
+    //   session key ──AES-256-GCM──► encrypted password entry
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// Generates a fresh X25519 keypair.
+    ///
+    /// Returns `(private_key[32], public_key[32])`.
+    /// - **Public key**  → store in vault metadata (plaintext is fine)
+    /// - **Private key** → must be protected with `encrypt_x25519_private_key_with_mpass`
+    pub fn generate_x25519_keypair() -> ([u8; 32], [u8; 32]) {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public = X25519Public::from(&secret);
+        (secret.to_bytes(), public.to_bytes())
+    }
+
+    /// Protects the 32-byte X25519 private key under the master password.
+    ///
+    /// KDF: Argon2id (m=64MB, t=3, p=1) → 32-byte wrapping key → AES-256-GCM.
+    ///
+    /// Blob format: `salt(16) ++ nonce(12) ++ ciphertext(32) ++ tag(16)` = **76 bytes**
+    pub fn encrypt_x25519_private_key_with_mpass(
+        mpass: &str,
+        private_key: &[u8; 32],
+    ) -> Result<Vec<u8>, String> {
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+
+        let wrapping_key = argon2id_kdf(mpass, &salt)?;
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrapping_key));
+        let nonce = Aes256Gcm::generate_nonce(&mut AesOsRng);
+
+        let ciphertext = cipher
+            .encrypt(&nonce, private_key.as_slice())
+            .map_err(|e| format!("AES-GCM encrypt failed: {e}"))?;
+
+        let mut blob = Vec::with_capacity(76);
+        blob.extend_from_slice(&salt);
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ciphertext);
+        Ok(blob)
+    }
+
+    /// Recovers the X25519 private key from its master-password-protected blob.
+    ///
+    /// Blob format: `salt(16) ++ nonce(12) ++ ciphertext+tag(48)` = **76 bytes**
+    pub fn decrypt_x25519_private_key_with_mpass(
+        mpass: &str,
+        blob: &[u8],
+    ) -> Result<[u8; 32], String> {
+        if blob.len() < 76 {
+            return Err(format!("Blob too short: {} bytes (expected 76)", blob.len()));
+        }
+
+        let (salt, rest) = blob.split_at(16);
+        let (nonce_bytes, ciphertext) = rest.split_at(12);
+
+        let wrapping_key = argon2id_kdf(mpass, salt)?;
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrapping_key));
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| format!("AES-GCM decrypt failed (wrong password?): {e}"))?;
 
         let mut key = [0u8; 32];
-        for (i, chunk) in hex_str.as_bytes().chunks(2).enumerate() {
-            let byte_str =
-                std::str::from_utf8(chunk).map_err(|e| format!("Invalid hex chunk: {e}"))?;
-            key[i] = u8::from_str_radix(byte_str, 16)
-                .map_err(|e| format!("Hex decode failed at byte {i}: {e}"))?;
-        }
-
+        key.copy_from_slice(&plaintext);
         Ok(key)
     }
 
-    // ─── DECRYPTION LAYER 3: recover plaintext string from AES ciphertext ────
-
-    /// Decrypts an AES-256-GCM ciphertext blob back to a UTF-8 string.
-    /// Expects the exact format produced by `encrypt_string_with_aes`:
-    /// `[12-byte nonce] ++ [ciphertext + 16-byte GCM auth tag]`
+    /// Encrypts a 32-byte AES session key to a recipient's X25519 public key
+    /// using ECIES: ephemeral ECDH → HKDF-SHA256 → AES-256-GCM.
+    /// A fresh ephemeral keypair is generated every call (forward secrecy).
     ///
-    /// The GCM tag guarantees authenticity — any tampering returns `Err`.
-    ///
-    /// # Arguments
-    /// * `nonce_and_ciphertext` - Blob from `encrypt_string_with_aes`
-    /// * `session_key`          - The 32-byte AES key recovered via `decrypt_session_key_with_private_key`
-    ///
-    /// # Returns
-    /// * `Ok(String)` - Recovered plaintext
-    /// * `Err(String)` - Auth failure, wrong key, or bad UTF-8
-    pub fn decrypt_string_with_aes(
-        nonce_and_ciphertext: &[u8],
+    /// Blob format: `eph_pub(32) ++ nonce(12) ++ ciphertext(32) ++ tag(16)` = **92 bytes**
+    pub fn encrypt_session_key_with_public_key(
         session_key: &[u8; 32],
-    ) -> Result<String, String> {
-        // Minimum: 12-byte nonce + 16-byte GCM tag (empty plaintext)
-        if nonce_and_ciphertext.len() < 28 {
-            return Err(format!(
-                "Blob too short: {} bytes (minimum 28)",
-                nonce_and_ciphertext.len()
-            ));
+        recipient_public_key: &[u8; 32],
+    ) -> Result<Vec<u8>, String> {
+        let recipient_pub = X25519Public::from(*recipient_public_key);
+        let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
+        let ephemeral_public = X25519Public::from(&ephemeral_secret);
+
+        let shared = ephemeral_secret.diffie_hellman(&recipient_pub);
+        let wrapping_key = hkdf_sha256(shared.as_bytes(), b"session-key-wrap")?;
+
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrapping_key));
+        let nonce = Aes256Gcm::generate_nonce(&mut AesOsRng);
+
+        let ciphertext = cipher
+            .encrypt(&nonce, session_key.as_slice())
+            .map_err(|e| format!("ECIES encrypt failed: {e}"))?;
+
+        let mut blob = Vec::with_capacity(92);
+        blob.extend_from_slice(ephemeral_public.as_bytes()); // 32
+        blob.extend_from_slice(&nonce);                      // 12
+        blob.extend_from_slice(&ciphertext);                 // 32 + 16 tag
+        Ok(blob)
+    }
+
+    /// Recovers a 32-byte AES session key from an ECIES blob using the
+    /// recipient's X25519 private key.
+    ///
+    /// Blob format: `eph_pub(32) ++ nonce(12) ++ ciphertext+tag(48)` = **92 bytes**
+    pub fn decrypt_session_key_with_private_key(
+        blob: &[u8],
+        private_key_bytes: &[u8; 32],
+    ) -> Result<[u8; 32], String> {
+        if blob.len() < 92 {
+            return Err(format!("Blob too short: {} bytes (expected 92)", blob.len()));
         }
 
-        let (nonce_bytes, ciphertext) = nonce_and_ciphertext.split_at(12);
-        let key = Key::<Aes256Gcm>::from_slice(session_key);
-        let cipher = Aes256Gcm::new(key);
+        let (eph_pub_bytes, rest) = blob.split_at(32);
+        let (nonce_bytes, ciphertext) = rest.split_at(12);
+
+        let mut eph_arr = [0u8; 32];
+        eph_arr.copy_from_slice(eph_pub_bytes);
+        let ephemeral_pub = X25519Public::from(eph_arr);
+        let static_secret = StaticSecret::from(*private_key_bytes);
+
+        let shared = static_secret.diffie_hellman(&ephemeral_pub);
+        let wrapping_key = hkdf_sha256(shared.as_bytes(), b"session-key-wrap")?;
+
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrapping_key));
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        let plaintext_bytes = cipher
+        let plaintext = cipher
             .decrypt(nonce, ciphertext)
-            .map_err(|e| format!("AES-GCM decryption failed (wrong key or tampered data): {e}"))?;
+            .map_err(|e| format!("ECIES decrypt failed (wrong key?): {e}"))?;
 
-        String::from_utf8(plaintext_bytes)
-            .map_err(|e| format!("Decrypted bytes are not valid UTF-8: {e}"))
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&plaintext);
+        Ok(key)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // PRIVATE HELPERS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// Argon2id: password + 16-byte salt → 32-byte output key.
+    /// Parameters: m=65536 (64 MB), t=3 iterations, p=1 lane.
+    fn argon2id_kdf(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+        use argon2::{Argon2, Params, Version};
+        let params = Params::new(65536, 3, 1, Some(32))
+            .map_err(|e| format!("Argon2 params error: {e}"))?;
+        let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
+        let mut key = [0u8; 32];
+        argon2
+            .hash_password_into(password.as_bytes(), salt, &mut key)
+            .map_err(|e| format!("Argon2 KDF failed: {e}"))?;
+        Ok(key)
+    }
+
+    /// HKDF-SHA256: input key material + info label → 32-byte output key.
+    fn hkdf_sha256(ikm: &[u8], info: &[u8]) -> Result<[u8; 32], String> {
+        let hk = Hkdf::<Sha256>::new(None, ikm);
+        let mut okm = [0u8; 32];
+        hk.expand(info, &mut okm)
+            .map_err(|e| format!("HKDF expand failed: {e}"))?;
+        Ok(okm)
     }
 }
-// ─────────────────────────────────────────────────────────────────────────────
+
+// =============================================================================
 // TESTS
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::crypt::*;
-    use pgp::composed::ArmorOptions;
     use pgp::composed::{
-        Deserializable, KeyType, SecretKeyParamsBuilder, SignedPublicKey, SignedSecretKey,
+        ArmorOptions, Deserializable, KeyType, SecretKeyParamsBuilder,
+        SignedPublicKey, SignedSecretKey,
     };
     use pgp::ser::Serialize;
-    use pgp::types::{KeyDetails, Password}; // FIX E5: import KeyDetails so .key_id() resolves
+    use pgp::types::{KeyDetails, Password};
     use rand::thread_rng;
 
     const MASTER_PASS: &str = "test-master-password-123!";
 
-    fn make_plaintext_keypair() -> (String, String) {
+    // ── test helpers ──────────────────────────────────────────────────────────
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// Plaintext (no passphrase) PGP keypair — used for testing encrypt_private_key.
+    fn make_plaintext_pgp_keypair() -> (String, String) {
         let mut rng = thread_rng();
         let params = SecretKeyParamsBuilder::default()
             .key_type(KeyType::Ed25519)
-            .can_sign(true)
-            .can_certify(true)
-            .can_authenticate(true)
+            .can_sign(true).can_certify(true).can_authenticate(true)
             .primary_user_id("Test <test@example.com>".into())
             .passphrase(None)
             .build()
@@ -392,61 +414,129 @@ mod tests {
         let pw = Password::from("");
         let ssk: SignedSecretKey = sk.sign(&mut rng, &pw).expect("sign");
         let spk: SignedPublicKey = ssk.signed_public_key();
-        let sk_asc = ssk
-            .to_armored_string(ArmorOptions::default())
-            .expect("armor sk");
-        let pk_asc = spk
-            .to_armored_string(ArmorOptions::default())
-            .expect("armor pk");
+        let sk_asc = ssk.to_armored_string(ArmorOptions::default()).expect("armor sk");
+        let pk_asc = spk.to_armored_string(ArmorOptions::default()).expect("armor pk");
         (sk_asc, pk_asc)
     }
 
-    fn make_s2k_keypair() -> (String, String) {
-        let (plain_sk_asc, pk_asc) = make_plaintext_keypair();
-        let encrypted_sk_asc =
-            encrypt_private_key(MASTER_PASS, &plain_sk_asc).expect("encrypt_private_key");
-        (encrypted_sk_asc, pk_asc)
+    /// Returns an S2K-protected PGP private key (armored) + its public key (armored).
+    fn make_s2k_pgp_keypair() -> (String, String) {
+        let (plain_sk_asc, pk_asc) = make_plaintext_pgp_keypair();
+        let protected = encrypt_private_key(MASTER_PASS, &plain_sk_asc)
+            .expect("encrypt_private_key");
+        (protected, pk_asc)
     }
 
-    fn hex_encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    // ─── generate_aes_session_key ────────────────────────────────────────────
+    // ─── generate_key_pairs ───────────────────────────────────────────────────
 
     #[test]
-    fn test_generate_aes_session_key_is_32_bytes() {
-        println!("\n[TEST] test_generate_aes_session_key_is_32_bytes");
+    fn test_generate_key_pairs_does_not_panic() {
+        println!("\n[TEST] test_generate_key_pairs_does_not_panic");
+        generate_key_pairs();
+        println!("  ✓ generate_key_pairs() completed without panic");
+    }
+
+    // ─── encrypt_private_key / decrypt_private_key_with_mpass ────────────────
+
+    #[test]
+    fn test_encrypt_private_key_produces_pgp_armor() {
+        println!("\n[TEST] test_encrypt_private_key_produces_pgp_armor");
+        let (plain_sk_asc, _) = make_plaintext_pgp_keypair();
+        let result = encrypt_private_key(MASTER_PASS, &plain_sk_asc);
+        assert!(result.is_ok(), "{:?}", result.err());
+        let asc = result.unwrap();
+        println!("  First 80 chars: {}", &asc[..80.min(asc.len())]);
+        assert!(asc.contains("BEGIN PGP PRIVATE KEY BLOCK"));
+        assert!(asc.contains("END PGP PRIVATE KEY BLOCK"));
+        println!("  ✓ Output is valid PGP private key armor");
+    }
+
+    #[test]
+    fn test_encrypt_private_key_garbage_input_fails() {
+        println!("\n[TEST] test_encrypt_private_key_garbage_input_fails");
+        let result = encrypt_private_key(MASTER_PASS, "not-a-pgp-key");
+        println!("  Result is Err: {}", result.is_err());
+        assert!(result.is_err());
+        println!("  ✓ Garbage input returns Err");
+    }
+
+    #[test]
+    fn test_decrypt_private_key_correct_mpass_succeeds() {
+        println!("\n[TEST] test_decrypt_private_key_correct_mpass_succeeds");
+        let (sk_asc, _) = make_s2k_pgp_keypair();
+        let result = decrypt_private_key_with_mpass(MASTER_PASS, &sk_asc);
+        println!("  Result is Ok: {}", result.is_ok());
+        assert!(result.is_ok(), "{:?}", result.err());
+        println!("  Key ID: {:?}", result.unwrap().key_id());
+        println!("  ✓ Correct master password unlocks the key");
+    }
+
+    #[test]
+    fn test_decrypt_private_key_wrong_mpass_fails() {
+        println!("\n[TEST] test_decrypt_private_key_wrong_mpass_fails");
+        let (sk_asc, _) = make_s2k_pgp_keypair();
+        let result = decrypt_private_key_with_mpass("wrong-password", &sk_asc);
+        println!("  Result is Err: {}", result.is_err());
+        if let Err(ref e) = result { println!("  Error: {e}"); }
+        assert!(result.is_err());
+        println!("  ✓ Wrong master password rejected");
+    }
+
+    #[test]
+    fn test_decrypt_private_key_garbage_input_fails() {
+        println!("\n[TEST] test_decrypt_private_key_garbage_input_fails");
+        let result = decrypt_private_key_with_mpass(MASTER_PASS, "garbage");
+        assert!(result.is_err());
+        println!("  ✓ Garbage input returns Err");
+    }
+
+    // ─── generate_aes_session_key ─────────────────────────────────────────────
+
+    #[test]
+    fn test_aes_session_key_is_32_bytes() {
+        println!("\n[TEST] test_aes_session_key_is_32_bytes");
         let key = generate_aes_session_key();
-        println!("  Key (hex): {}", hex_encode(&key));
+        println!("  Key: {}", hex(&key));
         assert_eq!(key.len(), 32);
-        println!("  ✓ 32-byte key confirmed");
+        println!("  ✓ 32-byte (256-bit) session key");
     }
 
     #[test]
-    fn test_generate_aes_session_key_unique_each_call() {
-        println!("\n[TEST] test_generate_aes_session_key_unique_each_call");
+    fn test_aes_session_key_unique_each_call() {
+        println!("\n[TEST] test_aes_session_key_unique_each_call");
         let a = generate_aes_session_key();
         let b = generate_aes_session_key();
-        println!("  Key A: {}", hex_encode(&a));
-        println!("  Key B: {}", hex_encode(&b));
+        println!("  A: {}", hex(&a));
+        println!("  B: {}", hex(&b));
         assert_ne!(a, b);
-        println!("  ✓ Keys are unique");
+        println!("  ✓ CSPRNG produces unique keys");
     }
 
-    // ─── AES encrypt / decrypt ────────────────────────────────────────────────
+    // ─── encrypt_string_with_aes / decrypt_string_with_aes ───────────────────
 
     #[test]
-    fn test_aes_round_trip() {
-        println!("\n[TEST] test_aes_round_trip");
+    fn test_aes_encrypt_decrypt_round_trip() {
+        println!("\n[TEST] test_aes_encrypt_decrypt_round_trip");
         let key = generate_aes_session_key();
         let original = "correct-horse-battery-staple";
         let blob = encrypt_string_with_aes(original, &key).expect("encrypt");
-        println!("  Blob: {} bytes", blob.len());
+        println!("  Blob: {} bytes  (12 nonce + {} ciphertext+tag)", blob.len(), blob.len()-12);
         let recovered = decrypt_string_with_aes(&blob, &key).expect("decrypt");
         println!("  Recovered: {recovered}");
         assert_eq!(original, recovered);
         println!("  ✓ AES round-trip ok");
+    }
+
+    #[test]
+    fn test_aes_same_plaintext_different_nonces() {
+        println!("\n[TEST] test_aes_same_plaintext_different_nonces");
+        let key = generate_aes_session_key();
+        let blob_a = encrypt_string_with_aes("hello", &key).expect("a");
+        let blob_b = encrypt_string_with_aes("hello", &key).expect("b");
+        println!("  Nonce A: {}", hex(&blob_a[..12]));
+        println!("  Nonce B: {}", hex(&blob_b[..12]));
+        assert_ne!(blob_a, blob_b, "Nonces must differ — no nonce reuse");
+        println!("  ✓ Fresh nonce generated each call");
     }
 
     #[test]
@@ -456,84 +546,146 @@ mod tests {
         let key_b = generate_aes_session_key();
         let blob = encrypt_string_with_aes("secret", &key_a).expect("encrypt");
         let result = decrypt_string_with_aes(&blob, &key_b);
-        println!("  Result is Err: {}", result.is_err());
         assert!(result.is_err());
         println!("  ✓ Wrong key rejected by GCM auth tag");
     }
 
     #[test]
-    fn test_aes_tampered_blob_fails() {
-        println!("\n[TEST] test_aes_tampered_blob_fails");
+    fn test_aes_tampered_ciphertext_fails() {
+        println!("\n[TEST] test_aes_tampered_ciphertext_fails");
         let key = generate_aes_session_key();
         let mut blob = encrypt_string_with_aes("tamper me", &key).expect("encrypt");
-        blob[13] ^= 0xFF;
+        blob[13] ^= 0xFF; // flip a ciphertext byte
         let result = decrypt_string_with_aes(&blob, &key);
         assert!(result.is_err());
-        println!("  ✓ Tampered ciphertext rejected");
-    }
-
-    // ─── PKESK session key encrypt / decrypt ─────────────────────────────────
-
-    #[test]
-    fn test_encrypt_session_key_returns_ok() {
-        println!("\n[TEST] test_encrypt_session_key_returns_ok");
-        let (_, pk_asc) = make_plaintext_keypair();
-        let session_key = generate_aes_session_key();
-        let result = encrypt_session_key_with_public_key(&session_key, &pk_asc);
-        println!("  Result is Ok: {}", result.is_ok());
-        if let Err(ref e) = result {
-            println!("  Error: {e}");
-        }
-        assert!(result.is_ok());
-        let asc = result.unwrap();
-        assert!(asc.contains("BEGIN PGP MESSAGE"));
-        println!("  ✓ Session key encrypted to public key");
+        println!("  ✓ Tampered ciphertext rejected by GCM auth tag");
     }
 
     #[test]
-    fn test_session_key_pkesk_round_trip() {
-        println!("\n[TEST] test_session_key_pkesk_round_trip");
-        let (plain_sk_asc, pk_asc) = make_plaintext_keypair();
-        let session_key = generate_aes_session_key();
-        println!("  Original : {}", hex_encode(&session_key));
-
-        let encrypted_msg = encrypt_session_key_with_public_key(&session_key, &pk_asc)
-            .expect("encrypt session key");
-
-        let (plain_sk, _) = SignedSecretKey::from_string(&plain_sk_asc).expect("parse sk");
-        let recovered = decrypt_session_key_with_private_key(&encrypted_msg, &plain_sk, "")
-            .expect("decrypt session key");
-
-        println!("  Recovered: {}", hex_encode(&recovered));
-        assert_eq!(session_key, recovered);
-        println!("  ✓ PKESK session key round-trip ok");
-    }
-
-    // ─── decrypt_private_key_with_mpass ──────────────────────────────────────
-
-    #[test]
-    fn test_decrypt_private_key_correct_mpass() {
-        println!("\n[TEST] test_decrypt_private_key_correct_mpass");
-        let (sk_asc, _) = make_s2k_keypair();
-        let result = decrypt_private_key_with_mpass(MASTER_PASS, &sk_asc);
-        println!("  Result is Ok: {}", result.is_ok());
-        assert!(result.is_ok(), "{:?}", result.err());
-        // FIX E5: KeyDetails imported above so .key_id() compiles
-        println!("  Key ID: {:?}", result.unwrap().key_id());
-        println!("  ✓ Private key unlocked with correct master password");
-    }
-
-    #[test]
-    fn test_decrypt_private_key_wrong_mpass_fails() {
-        println!("\n[TEST] test_decrypt_private_key_wrong_mpass_fails");
-        let (sk_asc, _) = make_s2k_keypair();
-        let result = decrypt_private_key_with_mpass("wrong-password", &sk_asc);
-        println!("  Result is Err: {}", result.is_err());
-        if let Err(ref e) = result {
-            println!("  Error: {e}");
-        }
+    fn test_aes_blob_too_short_fails() {
+        println!("\n[TEST] test_aes_blob_too_short_fails");
+        let key = generate_aes_session_key();
+        let result = decrypt_string_with_aes(&[0u8; 10], &key);
         assert!(result.is_err());
-        println!("  ✓ Wrong master password rejected");
+        println!("  ✓ Short blob returns Err");
+    }
+
+    // ─── generate_x25519_keypair ──────────────────────────────────────────────
+
+    #[test]
+    fn test_x25519_keypair_lengths() {
+        println!("\n[TEST] test_x25519_keypair_lengths");
+        let (priv_key, pub_key) = generate_x25519_keypair();
+        println!("  Private: {}", hex(&priv_key));
+        println!("  Public : {}", hex(&pub_key));
+        assert_eq!(priv_key.len(), 32);
+        assert_eq!(pub_key.len(), 32);
+        println!("  ✓ Both keys are 32 bytes");
+    }
+
+    #[test]
+    fn test_x25519_keypair_unique() {
+        println!("\n[TEST] test_x25519_keypair_unique");
+        let (a, _) = generate_x25519_keypair();
+        let (b, _) = generate_x25519_keypair();
+        assert_ne!(a, b);
+        println!("  ✓ Keypairs are unique");
+    }
+
+    // ─── encrypt/decrypt X25519 private key with master password ─────────────
+
+    #[test]
+    fn test_x25519_private_key_protect_round_trip() {
+        println!("\n[TEST] test_x25519_private_key_protect_round_trip");
+        let (priv_key, _) = generate_x25519_keypair();
+        println!("  Original : {}", hex(&priv_key));
+        let blob = encrypt_x25519_private_key_with_mpass(MASTER_PASS, &priv_key).expect("protect");
+        println!("  Blob     : {} bytes (expected 76)", blob.len());
+        assert_eq!(blob.len(), 76, "salt(16)+nonce(12)+ct(32)+tag(16)=76");
+        let recovered = decrypt_x25519_private_key_with_mpass(MASTER_PASS, &blob).expect("unprotect");
+        println!("  Recovered: {}", hex(&recovered));
+        assert_eq!(priv_key, recovered);
+        println!("  ✓ X25519 private key protect → unprotect round-trip ok");
+    }
+
+    #[test]
+    fn test_x25519_private_key_wrong_mpass_fails() {
+        println!("\n[TEST] test_x25519_private_key_wrong_mpass_fails");
+        let (priv_key, _) = generate_x25519_keypair();
+        let blob = encrypt_x25519_private_key_with_mpass(MASTER_PASS, &priv_key).expect("protect");
+        let result = decrypt_x25519_private_key_with_mpass("wrong-password", &blob);
+        assert!(result.is_err());
+        println!("  ✓ Wrong master password rejected by AES-GCM auth tag");
+    }
+
+    #[test]
+    fn test_x25519_different_salts_per_call() {
+        println!("\n[TEST] test_x25519_different_salts_per_call");
+        let (priv_key, _) = generate_x25519_keypair();
+        let blob_a = encrypt_x25519_private_key_with_mpass(MASTER_PASS, &priv_key).expect("a");
+        let blob_b = encrypt_x25519_private_key_with_mpass(MASTER_PASS, &priv_key).expect("b");
+        // First 16 bytes are the Argon2 salt — must differ
+        assert_ne!(&blob_a[..16], &blob_b[..16], "Argon2 salt must be random each call");
+        println!("  ✓ Fresh Argon2 salt generated each call");
+    }
+
+    // ─── encrypt/decrypt session key with X25519 (ECIES) ─────────────────────
+
+    #[test]
+    fn test_encrypt_session_key_blob_is_92_bytes() {
+        println!("\n[TEST] test_encrypt_session_key_blob_is_92_bytes");
+        let (_, pub_key) = generate_x25519_keypair();
+        let session_key = generate_aes_session_key();
+        let blob = encrypt_session_key_with_public_key(&session_key, &pub_key).expect("encrypt");
+        println!("  Blob: {} bytes (expected 92 = eph_pub(32)+nonce(12)+ct(32)+tag(16))", blob.len());
+        assert_eq!(blob.len(), 92);
+        println!("  ✓ Blob is exactly 92 bytes");
+    }
+
+    #[test]
+    fn test_session_key_ecies_round_trip() {
+        println!("\n[TEST] test_session_key_ecies_round_trip");
+        let (priv_key, pub_key) = generate_x25519_keypair();
+        let session_key = generate_aes_session_key();
+        println!("  Original : {}", hex(&session_key));
+        let blob = encrypt_session_key_with_public_key(&session_key, &pub_key).expect("encrypt");
+        let recovered = decrypt_session_key_with_private_key(&blob, &priv_key).expect("decrypt");
+        println!("  Recovered: {}", hex(&recovered));
+        assert_eq!(session_key, recovered);
+        println!("  ✓ ECIES session key round-trip ok");
+    }
+
+    #[test]
+    fn test_session_key_wrong_private_key_fails() {
+        println!("\n[TEST] test_session_key_wrong_private_key_fails");
+        let (_, pub_key) = generate_x25519_keypair();
+        let (wrong_priv, _) = generate_x25519_keypair();
+        let session_key = generate_aes_session_key();
+        let blob = encrypt_session_key_with_public_key(&session_key, &pub_key).expect("encrypt");
+        let result = decrypt_session_key_with_private_key(&blob, &wrong_priv);
+        assert!(result.is_err());
+        println!("  ✓ Wrong private key rejected by AES-GCM auth tag");
+    }
+
+    #[test]
+    fn test_session_key_fresh_ephemeral_each_call() {
+        println!("\n[TEST] test_session_key_fresh_ephemeral_each_call");
+        let (_, pub_key) = generate_x25519_keypair();
+        let session_key = generate_aes_session_key();
+        let blob_a = encrypt_session_key_with_public_key(&session_key, &pub_key).expect("a");
+        let blob_b = encrypt_session_key_with_public_key(&session_key, &pub_key).expect("b");
+        // First 32 bytes are the ephemeral public key — must differ each call
+        assert_ne!(&blob_a[..32], &blob_b[..32], "Ephemeral key must differ each call");
+        println!("  ✓ Fresh ephemeral keypair each call (forward secrecy)");
+    }
+
+    #[test]
+    fn test_session_key_blob_too_short_fails() {
+        println!("\n[TEST] test_session_key_blob_too_short_fails");
+        let (priv_key, _) = generate_x25519_keypair();
+        let result = decrypt_session_key_with_private_key(&[0u8; 50], &priv_key);
+        assert!(result.is_err());
+        println!("  ✓ Short blob returns Err");
     }
 
     // ─── FULL END-TO-END PIPELINE ─────────────────────────────────────────────
@@ -541,48 +693,48 @@ mod tests {
     #[test]
     fn test_full_hybrid_pipeline() {
         println!("\n[TEST] test_full_hybrid_pipeline");
+        println!("  Simulating a full password manager store → retrieve cycle\n");
 
         let password_to_store = "my-bank-password-abc123!";
-        println!("  [0] Password to store       : {password_to_store}");
+        println!("  [0] Password to store        : {password_to_store}");
 
-        // Encrypt path
-        let (plain_sk_asc, pk_asc) = make_plaintext_keypair();
+        // ── Vault setup (done once when vault is created) ─────────────────────
+        let (x25519_priv, x25519_pub) = generate_x25519_keypair();
+        let protected_priv = encrypt_x25519_private_key_with_mpass(MASTER_PASS, &x25519_priv)
+            .expect("protect X25519 private key");
+        println!("  [setup] X25519 keypair generated");
+        println!("  [setup] Private key blob     : {} bytes", protected_priv.len());
+
+        // ── Store a password entry ─────────────────────────────────────────────
         let session_key = generate_aes_session_key();
-        println!(
-            "  [1] Session key             : {}",
-            hex_encode(&session_key)
-        );
+        println!("  [store] Session key          : {}", hex(&session_key));
 
-        let encrypted_blob =
-            encrypt_string_with_aes(password_to_store, &session_key).expect("AES encrypt");
-        println!(
-            "  [2] AES blob                : {} bytes",
-            encrypted_blob.len()
-        );
+        let encrypted_password = encrypt_string_with_aes(password_to_store, &session_key)
+            .expect("AES encrypt password");
+        println!("  [store] Encrypted password   : {} bytes", encrypted_password.len());
 
-        let encrypted_sk_msg =
-            encrypt_session_key_with_public_key(&session_key, &pk_asc).expect("PKESK wrap");
-        println!(
-            "  [3] PKESK message           : {} chars",
-            encrypted_sk_msg.len()
-        );
+        let encrypted_session_key = encrypt_session_key_with_public_key(&session_key, &x25519_pub)
+            .expect("ECIES wrap session key");
+        println!("  [store] Encrypted session key: {} bytes", encrypted_session_key.len());
 
-        // Decrypt path
-        let (plain_sk, _) = SignedSecretKey::from_string(&plain_sk_asc).expect("parse sk");
+        // ── Retrieve a password entry (user supplies master password) ──────────
+        let recovered_priv = decrypt_x25519_private_key_with_mpass(MASTER_PASS, &protected_priv)
+            .expect("unprotect X25519 private key");
+        println!("  [retrieve] Private key recovered");
+
         let recovered_session_key =
-            decrypt_session_key_with_private_key(&encrypted_sk_msg, &plain_sk, "")
-                .expect("PKESK unwrap");
-        println!(
-            "  [4] Recovered session key   : {}",
-            hex_encode(&recovered_session_key)
-        );
+            decrypt_session_key_with_private_key(&encrypted_session_key, &recovered_priv)
+                .expect("ECIES unwrap session key");
+        println!("  [retrieve] Session key       : {}", hex(&recovered_session_key));
 
         let recovered_password =
-            decrypt_string_with_aes(&encrypted_blob, &recovered_session_key).expect("AES decrypt");
-        println!("  [5] Recovered password      : {recovered_password}");
+            decrypt_string_with_aes(&encrypted_password, &recovered_session_key)
+                .expect("AES decrypt password");
+        println!("  [retrieve] Password          : {recovered_password}");
 
-        assert_eq!(session_key, recovered_session_key);
-        assert_eq!(password_to_store, recovered_password);
+        assert_eq!(x25519_priv, recovered_priv,    "private key must survive protect/unprotect");
+        assert_eq!(session_key, recovered_session_key, "session key must survive ECIES wrap/unwrap");
+        assert_eq!(password_to_store, recovered_password, "plaintext must survive full pipeline");
         println!("\n  ✓ Full hybrid pipeline verified end-to-end");
     }
 }

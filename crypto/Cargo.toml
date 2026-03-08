@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-pgp = "0.17.0"
-rand = "0.8"
-aes-gcm = "0.10"
+pgp           = "=0.17.0"
+aes-gcm       = "0.10"
+x25519-dalek  = { version = "2", features = ["static_secrets"] }
+hkdf          = "0.12"
+sha2          = "0.10"
+argon2        = "0.5"
+rand          = "0.8"
