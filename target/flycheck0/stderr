@@ -1,8 +1,8 @@
-error: duplicate key `rand` in table `dependencies`
-  --> crypto/Cargo.toml:13:1
+error: invalid basic string
+  --> db/Cargo.toml:13:14
    |
-13 | rand       = "0.8"
-   | ^
+13 | tempfile = "3
+   |              ^
    |
-error: failed to load manifest for workspace member `/home/rahim/Desktop/DEV-WORK/phrase/crypto`
+error: failed to load manifest for workspace member `/home/rahim/Desktop/DEV-WORK/phrase/db`
 referenced by workspace at `/home/rahim/Desktop/DEV-WORK/phrase/Cargo.toml`
