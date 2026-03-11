@@ -439,8 +439,12 @@ name = "crypto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "argon2",
+ "hkdf",
  "pgp",
  "rand",
+ "sha2",
+ "x25519-dalek",
 ]
 
 [[package]]
