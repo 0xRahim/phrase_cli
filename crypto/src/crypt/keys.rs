@@ -24,7 +24,17 @@ use rand::thread_rng;
 ///
 /// The private key is protected with a hard-coded demonstration passphrase.
 /// In production, replace the passphrase with one supplied by the user.
-pub fn generate_key_pairs() {
+/// Generates an Ed25519 PGP keypair.
+///
+/// The private key is S2K-protected (iterated+salted SHA-256 → AES-256-CFB)
+/// using `mpass` at the packet level — the returned `secret_key_asc` string
+/// is already encrypted at rest. It cannot be used without `mpass`.
+///
+/// Returns `(public_key_asc, secret_key_asc)`.
+pub fn generate_key_pairs(
+    mpass: &str,
+    user_id: &str,              // e.g. "Alice <alice@example.com>"
+) -> Result<(String, String), String> {
     let mut rng = thread_rng();
 
     let params = SecretKeyParamsBuilder::default()
@@ -32,42 +42,31 @@ pub fn generate_key_pairs() {
         .can_sign(true)
         .can_certify(true)
         .can_authenticate(true)
-        .primary_user_id("User <user@example.com>".into())
-        .passphrase(Some("your-secure-passphrase".into()))
+        .primary_user_id(user_id.into())
+        .passphrase(Some(mpass.into()))  // ← user-supplied, not hardcoded
         .build()
-        .expect("Failed to build key params");
+        .map_err(|e| format!("Failed to build key params: {e}"))?;
 
     let secret_key = params
         .generate(&mut rng)
-        .expect("Failed to generate secret key");
+        .map_err(|e| format!("Failed to generate secret key: {e}"))?;
 
-    let passphrase = Password::from("your-secure-passphrase");
+    let password = Password::from(mpass);
     let signed_secret_key: SignedSecretKey = secret_key
-        .sign(&mut rng, &passphrase)
-        .expect("Failed to sign secret key");
+        .sign(&mut rng, &password)
+        .map_err(|e| format!("Failed to sign secret key: {e}"))?;
 
     let signed_public_key: SignedPublicKey = signed_secret_key.signed_public_key();
 
-    let fingerprint = signed_public_key
-        .fingerprint()
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<String>();
-
     let secret_key_asc = signed_secret_key
         .to_armored_string(ArmorOptions::default())
-        .expect("Failed to armor secret key");
+        .map_err(|e| format!("Failed to armor secret key: {e}"))?;
 
     let public_key_asc = signed_public_key
         .to_armored_string(ArmorOptions::default())
-        .expect("Failed to armor public key");
+        .map_err(|e| format!("Failed to armor public key: {e}"))?;
 
-    println!("=== KEY INFO ===");
-    println!("Key ID:      {:?}", signed_public_key.key_id());
-    println!("Fingerprint: {fingerprint}");
-    println!("\n=== SECRET KEY ===\n{secret_key_asc}");
-    println!("=== PUBLIC KEY ===\n{public_key_asc}");
+    Ok((public_key_asc, secret_key_asc))
 }
 
 /// Re-generates an Ed25519 PGP private key protected by `mpass` using S2K.
@@ -149,17 +148,15 @@ pub fn decrypt_private_key_with_mpass(
     let (secret_key, _) = SignedSecretKey::from_string(secret_key_asc)
         .map_err(|e| format!("Failed to parse secret key: {e}"))?;
 
-    secret_key
-        .verify()
-        .map_err(|e| format!("Key self-signature verification failed: {e}"))?;
+    secret_key.verify()
+        .map_err(|e| format!("Key self-signature invalid: {e}"))?;
 
     let pw = Password::from(mpass);
-
-    // pgp 0.17 unlock signature: unlock(&Password, |key_material: &[u8], _| -> Result<()>)
-    secret_key
+    // Eagerly attempt unlock so a wrong password fails here, not silently later
+    let _ = secret_key
         .primary_key
         .unlock(&pw, |_, _| Ok(()))
-        .map_err(|e| format!("Wrong master password (S2K unlock failed): {e}"))?;
+        .map_err(|_| "Wrong master password".to_string())?;
 
     Ok(secret_key)
 }

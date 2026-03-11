@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 db = {path = "../db" }
 crypto = {path = "../crypto" }
+rpassword = "7"
