@@ -16,9 +16,15 @@ mod tests {
 */
 
 pub mod Commands{
+    use db::*;
+    use crypto::*;
+
     pub mod vault{
+        use crypto::crypt::generate_key_pairs;
+
         pub fn new(vname: &str){
             println!("Creating a new vault {} ", vname);
+            generate_key_pairs();
         }
         pub fn list(){
             println!("Listing all vaults");
