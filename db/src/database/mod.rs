@@ -33,7 +33,7 @@ pub mod database {
  
     // ── Domain Models ─────────────────────────────────────────────────────────
  
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Copy, Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub enum EntryType {
         Login,
         Note,

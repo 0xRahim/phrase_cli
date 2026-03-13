@@ -76,67 +76,63 @@ pub mod Commands {
                 prompt_vault_credentials().expect("Failed to collect credentials");
             let (pub_key_asc, sec_key_asc) =
                 generate_key_pairs(&mpass, &user_id).expect("Failed to generate keypair");
-                println!("Public Key : {pub_key_asc}");
-                println!("Secret Key : {sec_key_asc}");
+            println!("Public Key : {pub_key_asc}");
+            println!("Secret Key : {sec_key_asc}");
 
-           // let secret_key_raw = decrypt_private_key_with_mpass(&mpass, &sec_key_asc).expect("can not decrypt private key");
+            // let secret_key_raw = decrypt_private_key_with_mpass(&mpass, &sec_key_asc).expect("can not decrypt private key");
             // Storing in the db
 
             let new_vault = NewVault {
-                vault_name:      vname.to_string(),
-                public_key:      pub_key_asc,
+                vault_name: vname.to_string(),
+                public_key: pub_key_asc,
                 enc_private_key: sec_key_asc,
-                is_default:      false
+                is_default: false,
             };
             let db = db::database::Database::open("/tmp/test.db").expect("db failed");
             let vault_id = db.create_vault(&new_vault);
-            println!("Vault Id : {}",vault_id.unwrap());
-
+            println!("Vault Id : {}", vault_id.unwrap());
         }
         pub fn list() {
             println!("Listing all vaults");
             let db = db::database::Database::open("/tmp/test.db").expect("b failed");
             let vaults = db.list_vaults();
-            for vault in vaults.unwrap().iter(){
-                println!("[*] : {}",vault.vault_name);
+            for vault in vaults.unwrap().iter() {
+                println!("[*] : {}", vault.vault_name);
             }
-
-            
         }
         pub fn rm(vname: &str) {
             let db = db::database::Database::open("/tmp/test.db").expect("b failed");
             let vaults = db.list_vaults();
-            for vault in vaults.unwrap().iter(){
+            for vault in vaults.unwrap().iter() {
                 if vault.vault_name == vname {
-                    if let Ok(()) = db.delete_vault(&vault.vault_id){
+                    if let Ok(()) = db.delete_vault(&vault.vault_id) {
                         println!("Deleted Vault {} ", vault.vault_name);
-                    }
-                    else {
-                        println!("Error While Deleting : {}",vault.vault_name);
+                    } else {
+                        println!("Error While Deleting : {}", vault.vault_name);
                     }
                 }
             }
-
         }
         pub fn use_(vname: &str) {
             let db = db::database::Database::open("/tmp/test.db").expect("b failed");
             let vaults = db.list_vaults();
-            for vault in vaults.unwrap().iter(){
+            for vault in vaults.unwrap().iter() {
                 if vault.vault_name == vname {
-                    if let Ok(()) = db.set_default_vault(vault.vault_id.as_str()){
+                    if let Ok(()) = db.set_default_vault(vault.vault_id.as_str()) {
                         println!("Default Vault : {} ", vault.vault_name);
-                    }
-                    else {
-                        println!("Error While Setting Default : {}",vault.vault_name);
+                    } else {
+                        println!("Error While Setting Default : {}", vault.vault_name);
                     }
                 }
             }
-
         }
     }
     pub mod category {
         pub fn new(cname: &str) {
-            println!("Creating a new category {} ", cname);
+            println!(
+                "Creating a new category and adding a new entry to it {} ",
+                cname
+            );
         }
         pub fn list() {
             println!("Listing all categories");
@@ -149,8 +145,36 @@ pub mod Commands {
         }
     }
     pub mod entry {
-        pub fn new(ename: &str, cname: &str) {
-            println!("Creating a new entry {} in category {} ", ename, cname);
+        use db::database::{EntryType, NewEntry};
+        use serde::Serialize;
+        use std::{io, process::exit};
+        use std::io::{Write};
+
+        #[derive(Serialize)]
+        struct Entry {
+            alias: String,
+            entry_type: EntryType,
+            category: String,
+            username: Option<String>,
+            password: Option<String>,
+            file_path: Option<String>,
+            notes: Option<String>,
+            seed_phrase: Option<String>,
+        }
+        pub fn new(alias: &str, cname: &str) {
+            println!("Creating a new entry {} in category {} ", alias, cname);
+            let entry = get_entry_inputs(alias, cname);
+            let vault_id = get_current_vault_id();
+            let data = serde_json::to_string(&entry).unwrap();
+            let new_entry = NewEntry {
+                vault_id: vault_id,
+                alias: entry.alias,
+                category: entry.category,
+                entry_type: entry.entry_type,
+                secret_data: data,
+            };
+            let db = db::database::Database::open("/tmp/test.db").expect("db failed");
+            db.create_entry(&new_entry).expect("Error");
         }
         pub fn list(cname: &str) {
             println!("Listing all entries in category {} ", cname);
@@ -163,6 +187,72 @@ pub mod Commands {
         }
         pub fn get(ename: &str, cname: &str) {
             println!("Getting Entry {} in category {} ", ename, cname);
+        }
+
+        // HELPER FUNCTIONS ----------------------------------
+        // ---------------------------------------------------
+       
+
+        fn get_entry_inputs(alias: &str, cname: &str) -> Entry {
+            // Ask for entry type
+            print!("Entry Type [default=login]: login, file, note, seedphrase: ");
+            io::stdout().flush().unwrap();
+
+            let mut entry_type = String::new();
+            io::stdin()
+                .read_line(&mut entry_type)
+                .expect("Error reading input");
+
+            let entry_type = entry_type.trim(); // remove newline and spaces
+
+            match entry_type {
+                "" | "login" => {
+                    // Ask for username
+                    print!("Enter Username: ");
+                    io::stdout().flush().unwrap();
+                    let mut username = String::new();
+                    io::stdin()
+                        .read_line(&mut username)
+                        .expect("Error reading username");
+                    let username = username.trim().to_string();
+
+                    // Ask for password
+                    print!("Enter Password: ");
+                    io::stdout().flush().unwrap();
+                    let password = rpassword::read_password().expect("Failed to read password");
+
+                    Entry {
+                        alias: alias.to_string(),
+                        entry_type: EntryType::Login,
+                        category: cname.to_string(),
+                        username: Some(username),
+                        password: Some(password),
+                        file_path: None,
+                        notes: None,
+                        seed_phrase: None,
+                    }
+                }
+                /*
+                "file" => {
+                    // implement file type input
+                }
+                "note" => {
+                    // implement note type input
+                }
+                "seedphrase" => {
+                    // implement seedphrase input
+                }
+                */
+                _ => {
+                    println!("Invalid type entered. Exiting.");
+                    exit(1);
+                }
+            }
+        }
+        fn get_current_vault_id() -> String {
+            let db = db::database::Database::open("/tmp/test.db").expect("db failed");
+            let vault = db.get_default_vault().expect("can't get default vault");
+            return vault.vault_id.to_string();
         }
     }
 }

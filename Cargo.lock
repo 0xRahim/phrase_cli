@@ -440,6 +440,8 @@ dependencies = [
  "crypto",
  "db",
  "rpassword",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
