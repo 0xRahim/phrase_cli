@@ -3,16 +3,16 @@ pub mod database {
     use serde::{Deserialize, Serialize};
     use uuid::Uuid;
     use std::fmt;
-
+ 
     // ── Error Type ────────────────────────────────────────────────────────────
-
+ 
     #[derive(Debug)]
     pub enum DbError {
         Rusqlite(rusqlite::Error),
         NotFound(String),
         InvalidInput(String),
     }
-
+ 
     impl fmt::Display for DbError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
@@ -22,17 +22,17 @@ pub mod database {
             }
         }
     }
-
+ 
     impl From<rusqlite::Error> for DbError {
         fn from(e: rusqlite::Error) -> Self {
             DbError::Rusqlite(e)
         }
     }
-
+ 
     pub type DbResult<T> = std::result::Result<T, DbError>;
-
+ 
     // ── Domain Models ─────────────────────────────────────────────────────────
-
+ 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub enum EntryType {
         Login,
@@ -40,7 +40,7 @@ pub mod database {
         File,
         Seed,
     }
-
+ 
     impl fmt::Display for EntryType {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
@@ -51,7 +51,7 @@ pub mod database {
             }
         }
     }
-
+ 
     impl EntryType {
         pub fn from_str(s: &str) -> DbResult<Self> {
             match s.to_uppercase().as_str() {
@@ -63,15 +63,18 @@ pub mod database {
             }
         }
     }
-
+ 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Vault {
         pub vault_id:        String,
         pub vault_name:      String,
         pub public_key:      String,
         pub enc_private_key: String,
+        /// True when this vault is the user-designated default.
+        /// At most one vault in the table can have this set to true.
+        pub is_default:      bool,
     }
-
+ 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Entry {
         pub id:          String,
@@ -81,16 +84,19 @@ pub mod database {
         pub entry_type:  EntryType,
         pub secret_data: String,   // JSON blob
     }
-
+ 
     // ─── New-object DTOs (no ID required from caller) ─────────────────────────
-
+ 
     #[derive(Debug, Clone)]
     pub struct NewVault {
         pub vault_name:      String,
         pub public_key:      String,
         pub enc_private_key: String,
+        /// Set to true to make this the default vault on creation.
+        /// Any previously-default vault will be automatically unset.
+        pub is_default:      bool,
     }
-
+ 
     #[derive(Debug, Clone)]
     pub struct NewEntry {
         pub vault_id:    String,
@@ -99,16 +105,16 @@ pub mod database {
         pub entry_type:  EntryType,
         pub secret_data: String,
     }
-
+ 
     // ── Database handle ──────────────────────────────────────────────────────
-
+ 
     pub struct Database {
         conn: Connection,
     }
-
+ 
     impl Database {
         // ── Lifecycle ─────────────────────────────────────────────────────────
-
+ 
         /// Open (or create) a SQLite file at `path`.
         /// Pass `":memory:"` for an in-memory database (great for tests).
         pub fn open(path: &str) -> DbResult<Self> {
@@ -118,16 +124,17 @@ pub mod database {
             db.run_migrations()?;
             Ok(db)
         }
-
+ 
         fn run_migrations(&self) -> DbResult<()> {
             self.conn.execute_batch("
                 CREATE TABLE IF NOT EXISTS vaults (
-                    vault_id        TEXT PRIMARY KEY NOT NULL,
-                    vault_name      TEXT NOT NULL UNIQUE,
-                    public_key      TEXT NOT NULL,
-                    enc_private_key TEXT NOT NULL
+                    vault_id        TEXT    PRIMARY KEY NOT NULL,
+                    vault_name      TEXT    NOT NULL UNIQUE,
+                    public_key      TEXT    NOT NULL,
+                    enc_private_key TEXT    NOT NULL,
+                    is_default      INTEGER NOT NULL DEFAULT 0
                 );
-
+ 
                 CREATE TABLE IF NOT EXISTS entries (
                     id          TEXT PRIMARY KEY NOT NULL,
                     vault_id    TEXT NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
@@ -136,35 +143,57 @@ pub mod database {
                     type        TEXT NOT NULL CHECK(type IN ('LOGIN','NOTE','FILE','SEED')),
                     secret_data TEXT NOT NULL
                 );
-
+ 
                 CREATE INDEX IF NOT EXISTS idx_entries_vault_id ON entries(vault_id);
             ")?;
+ 
+            // Idempotent migration for databases created before is_default was added.
+            // `ALTER TABLE … ADD COLUMN` is a no-op if the column already exists in
+            // SQLite ≥ 3.37; for older versions we swallow the "duplicate column" error.
+            let _ = self.conn.execute_batch(
+                "ALTER TABLE vaults ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;"
+            );
+ 
             Ok(())
         }
-
+ 
         // ══════════════════════════════════════════════════════════════════════
         //  VAULT CRUD
         // ══════════════════════════════════════════════════════════════════════
-
+ 
         /// Create a new vault; returns the generated vault_id.
+        /// If `new_vault.is_default` is true, any previously-default vault is
+        /// automatically unset so at most one default exists at a time.
         pub fn create_vault(&self, new_vault: &NewVault) -> DbResult<String> {
             if new_vault.vault_name.trim().is_empty() {
                 return Err(DbError::InvalidInput("vault_name cannot be empty".into()));
             }
+            if new_vault.is_default {
+                self.conn.execute(
+                    "UPDATE vaults SET is_default=0 WHERE is_default=1",
+                    [],
+                )?;
+            }
             let id = Uuid::new_v4().to_string();
             self.conn.execute(
-                "INSERT INTO vaults (vault_id, vault_name, public_key, enc_private_key)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![id, new_vault.vault_name, new_vault.public_key, new_vault.enc_private_key],
+                "INSERT INTO vaults (vault_id, vault_name, public_key, enc_private_key, is_default)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    id,
+                    new_vault.vault_name,
+                    new_vault.public_key,
+                    new_vault.enc_private_key,
+                    new_vault.is_default as i64,
+                ],
             )?;
             Ok(id)
         }
-
+ 
         /// Fetch a single vault by its ID.
         pub fn get_vault(&self, vault_id: &str) -> DbResult<Vault> {
             self.conn
                 .query_row(
-                    "SELECT vault_id, vault_name, public_key, enc_private_key
+                    "SELECT vault_id, vault_name, public_key, enc_private_key, is_default
                      FROM vaults WHERE vault_id = ?1",
                     params![vault_id],
                     |row| Ok(Vault {
@@ -172,6 +201,7 @@ pub mod database {
                         vault_name:      row.get(1)?,
                         public_key:      row.get(2)?,
                         enc_private_key: row.get(3)?,
+                        is_default:      row.get::<_, i64>(4)? != 0,
                     }),
                 )
                 .map_err(|e| match e {
@@ -180,11 +210,12 @@ pub mod database {
                     other => DbError::Rusqlite(other),
                 })
         }
-
+ 
         /// Fetch all vaults.
         pub fn list_vaults(&self) -> DbResult<Vec<Vault>> {
             let mut stmt = self.conn.prepare(
-                "SELECT vault_id, vault_name, public_key, enc_private_key FROM vaults ORDER BY vault_name",
+                "SELECT vault_id, vault_name, public_key, enc_private_key, is_default
+                 FROM vaults ORDER BY vault_name",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok(Vault {
@@ -192,33 +223,44 @@ pub mod database {
                     vault_name:      row.get(1)?,
                     public_key:      row.get(2)?,
                     enc_private_key: row.get(3)?,
+                    is_default:      row.get::<_, i64>(4)? != 0,
                 })
             })?;
             rows.collect::<Result<Vec<_>>>().map_err(DbError::from)
         }
-
-        /// Update mutable fields of a vault (name, keys).
+ 
+        /// Update mutable fields of a vault (name, keys, default flag).
+        /// If `is_default` is true, any previously-default vault is automatically unset.
         pub fn update_vault(
             &self,
             vault_id:        &str,
             vault_name:      &str,
             public_key:      &str,
             enc_private_key: &str,
+            is_default:      bool,
         ) -> DbResult<()> {
             if vault_name.trim().is_empty() {
                 return Err(DbError::InvalidInput("vault_name cannot be empty".into()));
             }
+            if is_default {
+                // Unset any current default that isn't this vault.
+                self.conn.execute(
+                    "UPDATE vaults SET is_default=0 WHERE is_default=1 AND vault_id!=?1",
+                    params![vault_id],
+                )?;
+            }
             let affected = self.conn.execute(
-                "UPDATE vaults SET vault_name=?1, public_key=?2, enc_private_key=?3
-                 WHERE vault_id=?4",
-                params![vault_name, public_key, enc_private_key, vault_id],
+                "UPDATE vaults
+                 SET vault_name=?1, public_key=?2, enc_private_key=?3, is_default=?4
+                 WHERE vault_id=?5",
+                params![vault_name, public_key, enc_private_key, is_default as i64, vault_id],
             )?;
             if affected == 0 {
                 return Err(DbError::NotFound(format!("Vault '{vault_id}' not found")));
             }
             Ok(())
         }
-
+ 
         /// Delete a vault (cascades to its entries).
         pub fn delete_vault(&self, vault_id: &str) -> DbResult<()> {
             let affected = self.conn.execute(
@@ -230,7 +272,47 @@ pub mod database {
             }
             Ok(())
         }
-
+ 
+        /// Return the vault currently marked as default.
+        /// Returns `DbError::NotFound` when no vault has `is_default = true`.
+        pub fn get_default_vault(&self) -> DbResult<Vault> {
+            self.conn
+                .query_row(
+                    "SELECT vault_id, vault_name, public_key, enc_private_key, is_default
+                     FROM vaults WHERE is_default=1 LIMIT 1",
+                    [],
+                    |row| Ok(Vault {
+                        vault_id:        row.get(0)?,
+                        vault_name:      row.get(1)?,
+                        public_key:      row.get(2)?,
+                        enc_private_key: row.get(3)?,
+                        is_default:      true,
+                    }),
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows =>
+                        DbError::NotFound("No default vault has been set".into()),
+                    other => DbError::Rusqlite(other),
+                })
+        }
+ 
+        /// Mark `vault_id` as the default vault.
+        /// The previously-default vault (if any) is automatically unset.
+        /// Returns `DbError::NotFound` if `vault_id` does not exist.
+        pub fn set_default_vault(&self, vault_id: &str) -> DbResult<()> {
+            // Verify the target exists first for a clear error message.
+            self.get_vault(vault_id)?;
+            // Unset every current default (there should be at most one).
+            self.conn.execute(
+                "UPDATE vaults SET is_default=0 WHERE is_default=1",
+                [],
+            )?;
+            self.conn.execute(
+                "UPDATE vaults SET is_default=1 WHERE vault_id=?1",
+                params![vault_id],
+            )?;
+            Ok(())
+        }
         // ══════════════════════════════════════════════════════════════════════
         //  ENTRY CRUD
         // ══════════════════════════════════════════════════════════════════════

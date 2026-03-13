@@ -1,27 +1,6 @@
-/*
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
-*/
-
 pub mod Commands {
-    use crypto::*;
-    use db::*;
 
     pub mod vault {
-        use crypto::crypt::decrypt_private_key_with_mpass;
-        use crypto::crypt::encrypt_private_key;
         use crypto::crypt::generate_key_pairs;
         use db::database::NewVault;
         use rpassword::read_password;
@@ -107,21 +86,52 @@ pub mod Commands {
                 vault_name:      vname.to_string(),
                 public_key:      pub_key_asc,
                 enc_private_key: sec_key_asc,
+                is_default:      false
             };
-            let db = db::database::Database::open(":memory:").expect("in-memory db failed");
+            let db = db::database::Database::open("/tmp/test.db").expect("db failed");
             let vault_id = db.create_vault(&new_vault);
             println!("Vault Id : {}",vault_id.unwrap());
 
         }
         pub fn list() {
             println!("Listing all vaults");
+            let db = db::database::Database::open("/tmp/test.db").expect("b failed");
+            let vaults = db.list_vaults();
+            for vault in vaults.unwrap().iter(){
+                println!("[*] : {}",vault.vault_name);
+            }
+
             
         }
         pub fn rm(vname: &str) {
-            println!("Deleting Vault {} ", vname);
+            let db = db::database::Database::open("/tmp/test.db").expect("b failed");
+            let vaults = db.list_vaults();
+            for vault in vaults.unwrap().iter(){
+                if vault.vault_name == vname {
+                    if let Ok(()) = db.delete_vault(&vault.vault_id){
+                        println!("Deleted Vault {} ", vault.vault_name);
+                    }
+                    else {
+                        println!("Error While Deleting : {}",vault.vault_name);
+                    }
+                }
+            }
+
         }
         pub fn use_(vname: &str) {
-            println!("Switching To Vault {} ", vname);
+            let db = db::database::Database::open("/tmp/test.db").expect("b failed");
+            let vaults = db.list_vaults();
+            for vault in vaults.unwrap().iter(){
+                if vault.vault_name == vname {
+                    if let Ok(()) = db.set_default_vault(vault.vault_id.as_str()){
+                        println!("Default Vault : {} ", vault.vault_name);
+                    }
+                    else {
+                        println!("Error While Setting Default : {}",vault.vault_name);
+                    }
+                }
+            }
+
         }
     }
     pub mod category {

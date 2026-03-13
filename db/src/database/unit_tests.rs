@@ -16,6 +16,7 @@ mod unit_tests {
             vault_name:      "TestVault".into(),
             public_key:      "pub_key_abc123".into(),
             enc_private_key: "enc_priv_xyz789".into(),
+            is_default:      false,
         }
     }
 
@@ -95,7 +96,7 @@ mod unit_tests {
     fn test_update_vault_success() {
         let db = in_memory_db();
         let id = db.create_vault(&sample_vault()).unwrap();
-        db.update_vault(&id, "UpdatedName", "new_pub", "new_enc").unwrap();
+        db.update_vault(&id, "UpdatedName", "new_pub", "new_enc", false).unwrap();
         let v = db.get_vault(&id).unwrap();
         assert_eq!(v.vault_name,      "UpdatedName");
         assert_eq!(v.public_key,      "new_pub");
@@ -106,14 +107,14 @@ mod unit_tests {
     fn test_update_vault_empty_name_fails() {
         let db = in_memory_db();
         let id = db.create_vault(&sample_vault()).unwrap();
-        let err = db.update_vault(&id, "", "pk", "epk").unwrap_err();
+        let err = db.update_vault(&id, "", "pk", "epk",false).unwrap_err();
         assert!(matches!(err, DbError::InvalidInput(_)));
     }
 
     #[test]
     fn test_update_vault_not_found() {
         let db  = in_memory_db();
-        let err = db.update_vault("ghost", "n", "p", "e").unwrap_err();
+        let err = db.update_vault("ghost", "n", "p", "e",false).unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
@@ -312,5 +313,76 @@ mod unit_tests {
         assert_eq!(EntryType::Note.to_string(),  "NOTE");
         assert_eq!(EntryType::File.to_string(),  "FILE");
         assert_eq!(EntryType::Seed.to_string(),  "SEED");
+    }
+
+
+
+    // ══ IS_DEFAULT / default vault – unit ══
+
+    #[test]
+    fn test_create_vault_is_default_false_by_default() {
+        let db = in_memory_db();
+        let id = db.create_vault(&sample_vault()).unwrap(); // is_default: false
+        let v  = db.get_vault(&id).unwrap();
+        assert_eq!(v.is_default, false);
+    }
+
+    #[test]
+    fn test_get_default_vault_none_set() {
+        let db  = in_memory_db();
+        let err = db.get_default_vault().unwrap_err();
+        assert!(matches!(err, DbError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_create_vault_as_default() {
+        let db = in_memory_db();
+        let id = db.create_vault(&NewVault { is_default: true, ..sample_vault() }).unwrap();
+        let v  = db.get_default_vault().unwrap();
+        assert_eq!(v.vault_id,   id);
+        assert_eq!(v.is_default, true);
+    }
+
+    #[test]
+    fn test_only_one_default_on_create() {
+        let db  = in_memory_db();
+        let id1 = db.create_vault(&NewVault { vault_name: "V1".into(), is_default: true,  ..sample_vault() }).unwrap();
+        let id2 = db.create_vault(&NewVault { vault_name: "V2".into(), is_default: true,  ..sample_vault() }).unwrap();
+        // id1 must now be non-default
+        assert_eq!(db.get_vault(&id1).unwrap().is_default, false);
+        assert_eq!(db.get_vault(&id2).unwrap().is_default, true);
+        // Only one default returned
+        assert_eq!(db.get_default_vault().unwrap().vault_id, id2);
+    }
+
+    #[test]
+    fn test_set_default_vault() {
+        let db  = in_memory_db();
+        let id1 = db.create_vault(&NewVault { vault_name: "V1".into(), is_default: false, ..sample_vault() }).unwrap();
+        let id2 = db.create_vault(&NewVault { vault_name: "V2".into(), is_default: false, ..sample_vault() }).unwrap();
+        db.set_default_vault(&id1).unwrap();
+        assert_eq!(db.get_default_vault().unwrap().vault_id, id1);
+        // Switch default
+        db.set_default_vault(&id2).unwrap();
+        assert_eq!(db.get_default_vault().unwrap().vault_id, id2);
+        assert_eq!(db.get_vault(&id1).unwrap().is_default, false);
+    }
+
+    #[test]
+    fn test_set_default_vault_not_found() {
+        let db  = in_memory_db();
+        let err = db.set_default_vault("ghost").unwrap_err();
+        assert!(matches!(err, DbError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_update_vault_promotes_to_default() {
+        let db  = in_memory_db();
+        let id1 = db.create_vault(&NewVault { vault_name: "V1".into(), is_default: true,  ..sample_vault() }).unwrap();
+        let id2 = db.create_vault(&NewVault { vault_name: "V2".into(), is_default: false, ..sample_vault() }).unwrap();
+        // Promote V2 via update_vault
+        db.update_vault(&id2, "V2", "pk", "epk", true).unwrap();
+        assert_eq!(db.get_vault(&id1).unwrap().is_default, false);
+        assert_eq!(db.get_vault(&id2).unwrap().is_default, true);
     }
 }
