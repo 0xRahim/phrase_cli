@@ -145,10 +145,13 @@ pub mod Commands {
         }
     }
     pub mod entry {
+        use crypto::crypt::generate_aes_session_key;
         use db::database::{EntryType, NewEntry};
         use serde::Serialize;
         use std::{io, process::exit};
         use std::io::{Write};
+        use crypto::crypt::encrypt_string_with_aes;
+        use base64::{engine::general_purpose, Engine as _};
 
         #[derive(Serialize)]
         struct Entry {
@@ -160,6 +163,7 @@ pub mod Commands {
             file_path: Option<String>,
             notes: Option<String>,
             seed_phrase: Option<String>,
+            aes_key: [u8; 32],
         }
         pub fn new(alias: &str, cname: &str) {
             println!("Creating a new entry {} in category {} ", alias, cname);
@@ -178,15 +182,32 @@ pub mod Commands {
         }
         pub fn list(cname: &str) {
             println!("Listing all entries in category {} ", cname);
+            let db = db::database::Database::open("/tmp/test.db").expect("db failed");
+            let vault_id = get_current_vault_id();
+            // TODO : Add category filter and make it work
+            let entries = db.list_entries_for_vault(&vault_id);
+            for entry in entries.unwrap().iter() {
+                println!("[*] : {}", entry.alias);
+            }
         }
         pub fn rm(ename: &str, cname: &str) {
             println!("Deleting Entry {} in category {} ", ename, cname);
+            let db = db::database::Database::open("/tmp/test.db").expect("db failed");
+            let entry = db.get_entry_by_alias(ename);
+            let entry_id = entry.unwrap().id;
+            if let Ok(()) = db.delete_entry(entry_id.as_str()){
+                println!("Deleted {} ",ename)
+            }
+            else {
+                println!("Failed in deleting ... ")
+            }
         }
         pub fn edit(ename: &str, cname: &str) {
             println!("Switching To Entry {} in category {} ", ename, cname);
         }
-        pub fn get(ename: &str, cname: &str) {
-            println!("Getting Entry {} in category {} ", ename, cname);
+        pub fn get(alias: &str, cname: &str) {
+            println!("Getting Entry {} in category {} ", alias, cname);
+
         }
 
         // HELPER FUNCTIONS ----------------------------------
@@ -220,7 +241,11 @@ pub mod Commands {
                     print!("Enter Password: ");
                     io::stdout().flush().unwrap();
                     let password = rpassword::read_password().expect("Failed to read password");
-
+                    let aes_key = generate_aes_session_key();
+                    let key_w_pass = encrypt_string_with_aes(password.as_str(), &aes_key).unwrap();
+                    let key_w_uname = encrypt_string_with_aes(username.as_str(), &aes_key).unwrap();
+                    let password = general_purpose::STANDARD.encode(&key_w_pass);
+                    let username = general_purpose::STANDARD.encode(&key_w_uname);
                     Entry {
                         alias: alias.to_string(),
                         entry_type: EntryType::Login,
@@ -230,6 +255,7 @@ pub mod Commands {
                         file_path: None,
                         notes: None,
                         seed_phrase: None,
+                        aes_key: aes_key,
                     }
                 }
                 /*
