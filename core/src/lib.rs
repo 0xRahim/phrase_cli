@@ -147,13 +147,13 @@ pub mod Commands {
     pub mod entry {
         use crypto::crypt::generate_aes_session_key;
         use db::database::{EntryType, NewEntry};
-        use serde::Serialize;
+        use serde::{Serialize,Deserialize};
         use std::{io, process::exit};
         use std::io::{Write};
         use crypto::crypt::encrypt_string_with_aes;
         use base64::{engine::general_purpose, Engine as _};
-
-        #[derive(Serialize)]
+        use crypto::crypt::decrypt_string_with_aes;
+        #[derive(Serialize, Deserialize, Debug)]
         struct Entry {
             alias: String,
             entry_type: EntryType,
@@ -204,15 +204,65 @@ pub mod Commands {
         }
         pub fn edit(ename: &str, cname: &str) {
             println!("Switching To Entry {} in category {} ", ename, cname);
+            let entry = get_entry_inputs(ename, cname);
+            let vault_id = get_current_vault_id();
+            let data = serde_json::to_string(&entry).unwrap();
+            let new_entry = NewEntry {
+                vault_id: vault_id,
+                alias: entry.alias,
+                category: entry.category,
+                entry_type: entry.entry_type,
+                secret_data: data,
+            };
+            let db = db::database::Database::open("/tmp/test.db").expect("db failed");
+            let id = db.get_entry_by_alias(&ename).unwrap().id;
+            if let Ok(()) = db.update_entry(&id, &new_entry.alias, &new_entry.category, &new_entry.entry_type, &new_entry.secret_data){
+                println!("Entry Updated");
+            }else {
+                println!("Failed to update the entry");
+            }
+
         }
         pub fn get(alias: &str, cname: &str) {
             println!("Getting Entry {} in category {} ", alias, cname);
+            let db = db::database::Database::open("/tmp/test.db").expect("db failed");
+            let entry_id = db.get_entry_by_alias(alias).expect("failed to read entry by alias").id;
+            let data = db.get_entry(entry_id.as_str()).expect("Failed to read entry");
+            display_entry(data);
 
         }
 
         // HELPER FUNCTIONS ----------------------------------
         // ---------------------------------------------------
-       
+       fn display_entry(entry: db::database::Entry){
+        let secret_data_struct: self::Entry= serde_json::from_str(&entry.secret_data).unwrap();
+        match entry.entry_type{
+            
+            EntryType::Login => {
+                let username_blob: Vec<u8> = general_purpose::STANDARD
+    .decode(secret_data_struct.username.unwrap())
+    .map_err(|e| format!("Base64 decode failed: {e}")).unwrap();
+
+                let password_blob: Vec<u8> = general_purpose::STANDARD
+    .decode(secret_data_struct.password.unwrap())
+    .map_err(|e| format!("Base64 decode failed: {e}")).unwrap();
+                let password = decrypt_string_with_aes(&password_blob, &secret_data_struct.aes_key).unwrap();
+                let username = decrypt_string_with_aes(&username_blob, &secret_data_struct.aes_key).unwrap();
+                println!("Username : {}", username);
+                println!("Password : {}", password);
+                
+            }
+            EntryType::Note => {
+                println!("Implement later");
+            }
+            EntryType::File => {
+                println!("Implement later");
+            }
+            EntryType::Seed => {
+                println!("Implement later");
+            }
+        }
+       }
 
         fn get_entry_inputs(alias: &str, cname: &str) -> Entry {
             // Ask for entry type
