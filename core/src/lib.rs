@@ -145,14 +145,16 @@ pub mod Commands {
         }
     }
     pub mod entry {
+        use arboard::Clipboard;
+        use base64::{Engine as _, engine::general_purpose};
+        use crypto::crypt::decrypt_string_with_aes;
+        use crypto::crypt::encrypt_string_with_aes;
         use crypto::crypt::generate_aes_session_key;
         use db::database::{EntryType, NewEntry};
-        use serde::{Serialize,Deserialize};
+        use serde::{Deserialize, Serialize};
+        use std::io::Write;
         use std::{io, process::exit};
-        use std::io::{Write};
-        use crypto::crypt::encrypt_string_with_aes;
-        use base64::{engine::general_purpose, Engine as _};
-        use crypto::crypt::decrypt_string_with_aes;
+
         #[derive(Serialize, Deserialize, Debug)]
         struct Entry {
             alias: String,
@@ -195,10 +197,9 @@ pub mod Commands {
             let db = db::database::Database::open("/tmp/test.db").expect("db failed");
             let entry = db.get_entry_by_alias(ename);
             let entry_id = entry.unwrap().id;
-            if let Ok(()) = db.delete_entry(entry_id.as_str()){
-                println!("Deleted {} ",ename)
-            }
-            else {
+            if let Ok(()) = db.delete_entry(entry_id.as_str()) {
+                println!("Deleted {} ", ename)
+            } else {
                 println!("Failed in deleting ... ")
             }
         }
@@ -216,53 +217,69 @@ pub mod Commands {
             };
             let db = db::database::Database::open("/tmp/test.db").expect("db failed");
             let id = db.get_entry_by_alias(&ename).unwrap().id;
-            if let Ok(()) = db.update_entry(&id, &new_entry.alias, &new_entry.category, &new_entry.entry_type, &new_entry.secret_data){
+            if let Ok(()) = db.update_entry(
+                &id,
+                &new_entry.alias,
+                &new_entry.category,
+                &new_entry.entry_type,
+                &new_entry.secret_data,
+            ) {
                 println!("Entry Updated");
-            }else {
+            } else {
                 println!("Failed to update the entry");
             }
-
         }
         pub fn get(alias: &str, cname: &str) {
             println!("Getting Entry {} in category {} ", alias, cname);
             let db = db::database::Database::open("/tmp/test.db").expect("db failed");
-            let entry_id = db.get_entry_by_alias(alias).expect("failed to read entry by alias").id;
-            let data = db.get_entry(entry_id.as_str()).expect("Failed to read entry");
+            let entry_id = db
+                .get_entry_by_alias(alias)
+                .expect("failed to read entry by alias")
+                .id;
+            let data = db
+                .get_entry(entry_id.as_str())
+                .expect("Failed to read entry");
             display_entry(data);
-
         }
 
         // HELPER FUNCTIONS ----------------------------------
         // ---------------------------------------------------
-       fn display_entry(entry: db::database::Entry){
-        let secret_data_struct: self::Entry= serde_json::from_str(&entry.secret_data).unwrap();
-        match entry.entry_type{
-            
-            EntryType::Login => {
-                let username_blob: Vec<u8> = general_purpose::STANDARD
-    .decode(secret_data_struct.username.unwrap())
-    .map_err(|e| format!("Base64 decode failed: {e}")).unwrap();
+        fn display_entry(entry: db::database::Entry) {
+            let secret_data_struct: self::Entry = serde_json::from_str(&entry.secret_data).unwrap();
+            match entry.entry_type {
+                EntryType::Login => {
+                    let username_blob: Vec<u8> = general_purpose::STANDARD
+                        .decode(secret_data_struct.username.unwrap())
+                        .map_err(|e| format!("Base64 decode failed: {e}"))
+                        .unwrap();
 
-                let password_blob: Vec<u8> = general_purpose::STANDARD
-    .decode(secret_data_struct.password.unwrap())
-    .map_err(|e| format!("Base64 decode failed: {e}")).unwrap();
-                let password = decrypt_string_with_aes(&password_blob, &secret_data_struct.aes_key).unwrap();
-                let username = decrypt_string_with_aes(&username_blob, &secret_data_struct.aes_key).unwrap();
-                println!("Username : {}", username);
-                println!("Password : {}", password);
-                
-            }
-            EntryType::Note => {
-                println!("Implement later");
-            }
-            EntryType::File => {
-                println!("Implement later");
-            }
-            EntryType::Seed => {
-                println!("Implement later");
+                    let password_blob: Vec<u8> = general_purpose::STANDARD
+                        .decode(secret_data_struct.password.unwrap())
+                        .map_err(|e| format!("Base64 decode failed: {e}"))
+                        .unwrap();
+                    let password =
+                        decrypt_string_with_aes(&password_blob, &secret_data_struct.aes_key)
+                            .unwrap();
+                    let username =
+                        decrypt_string_with_aes(&username_blob, &secret_data_struct.aes_key)
+                            .unwrap();
+                    println!("Username : {}", username);
+                    println!("password copied to clipboard");
+                    let mut clipboard = Clipboard::new().unwrap();
+                    clipboard.set_text(password.as_str()).expect("Failed to copy");
+                    hold_n_exit();
+                }
+                EntryType::Note => {
+                    println!("Implement later");
+                }
+                EntryType::File => {
+                    println!("Implement later");
+                }
+                EntryType::Seed => {
+                    println!("Implement later");
+                }
             }
         }
-       }
 
         fn get_entry_inputs(alias: &str, cname: &str) -> Entry {
             // Ask for entry type
@@ -329,6 +346,15 @@ pub mod Commands {
             let db = db::database::Database::open("/tmp/test.db").expect("db failed");
             let vault = db.get_default_vault().expect("can't get default vault");
             return vault.vault_id.to_string();
+        }
+
+        fn hold_n_exit() {
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).unwrap();
+            let text: &str = " ";
+            let mut clipboard = Clipboard::new().unwrap();
+            clipboard.set_text(text).expect("Failed to uncopy");
+            exit(0);
         }
     }
 }
