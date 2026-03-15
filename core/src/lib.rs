@@ -147,7 +147,9 @@ pub mod Commands {
     pub mod entry {
         use arboard::Clipboard;
         use base64::{Engine as _, engine::general_purpose};
+        use crypto::crypt::aes::encrypt_bytes_with_aes;
         use crypto::crypt::decrypt_string_with_aes;
+        use crypto::crypt::aes::decrypt_bytes_with_aes;
         use crypto::crypt::encrypt_string_with_aes;
         use crypto::crypt::generate_aes_session_key;
         use db::database::{EntryType, NewEntry};
@@ -273,7 +275,20 @@ pub mod Commands {
                     println!("Implement later");
                 }
                 EntryType::File => {
-                    println!("Implement later");
+                    println!("File implementation");
+                    let encrypted_file_path = secret_data_struct.file_path.unwrap();
+                    let encrypted_file_content = std::fs::read(encrypted_file_path.clone()).expect("Failed to read the file contents");
+                    let file_content = match decrypt_bytes_with_aes(&encrypted_file_content, &secret_data_struct.aes_key) {
+                        Ok(data) => {
+                            let decrypted_path = encrypted_file_path.replace(".phrased", "");
+                            std::fs::write(decrypted_path, data)
+                        },
+                        Err(e) => {
+                            println!("Decryption failed: {}", e);
+                            exit(1);
+                        }
+                    };
+                    
                 }
                 EntryType::Seed => {
                     println!("Implement later");
@@ -325,10 +340,40 @@ pub mod Commands {
                         aes_key: aes_key,
                     }
                 }
-                /*
+                
                 "file" => {
-                    // implement file type input
+                    print!("Enter File Path: ");
+                    io::stdout().flush().unwrap();
+                    
+                    let mut file_path = String::new();
+                    io::stdin()
+                        .read_line(&mut file_path)
+                        .expect("Error reading file path");
+                    
+                    let file_path = file_path.trim().to_string();
+                    
+                    let aes_key = generate_aes_session_key();
+                    
+                    let file_data = match std::fs::read(&file_path) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            println!("Failed to read file: {}", e);
+                            exit(1);
+                        }
+                    };
+                    
+                    let encrypted = match encrypt_bytes_with_aes(&file_data, &aes_key) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            println!("Encryption failed: {}", e);
+                            exit(1);
+                        }
+                    };
+                    let encrypted_file_path = format!("{}.phrased", file_path);
+                    std::fs::write(&encrypted_file_path, encrypted).expect("Failed to write file");
+                    Entry { alias: alias.to_string(), entry_type: EntryType::File, category: cname.to_string(), username: None, password: None, file_path: Some(file_path), notes: None, seed_phrase:None, aes_key:aes_key }
                 }
+                /*
                 "note" => {
                     // implement note type input
                 }

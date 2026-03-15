@@ -94,3 +94,46 @@ pub fn decrypt_string_with_aes(
     String::from_utf8(plaintext)
         .map_err(|e| format!("Decrypted bytes are not valid UTF-8: {e}"))
 }
+
+
+// FILE ENCRYPTION AND DECRYPTION
+pub fn encrypt_bytes_with_aes(
+    plaintext: &[u8],
+    session_key: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(session_key));
+    let nonce = Aes256Gcm::generate_nonce(&mut AesOsRng);
+
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| format!("AES-GCM encryption failed: {e}"))?;
+
+    let mut blob = nonce.to_vec();
+    blob.extend_from_slice(&ciphertext);
+
+    Ok(blob)
+}
+
+pub fn decrypt_bytes_with_aes(
+    blob: &[u8],
+    session_key: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    // Minimum valid blob: 12-byte nonce + 16-byte tag
+    if blob.len() < 28 {
+        return Err(format!(
+            "Blob too short: {} bytes (minimum 28 = 12 nonce + 16 tag)",
+            blob.len()
+        ));
+    }
+
+    let (nonce_bytes, ciphertext) = blob.split_at(12);
+
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(session_key));
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| format!("AES-GCM decryption failed (wrong key or tampered data): {e}"))?;
+
+    Ok(plaintext)
+}
