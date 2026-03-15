@@ -296,7 +296,11 @@ pub mod Commands {
                     
                 }
                 EntryType::Seed => {
-                    println!("Implement later");
+                    let seed_blob = general_purpose::STANDARD.decode(secret_data_struct.seed_phrase.unwrap()).map_err(|e| format!("Base64 decode failed: {e}")).unwrap();
+                    let seed = decrypt_string_with_aes(&seed_blob, &secret_data_struct.aes_key).unwrap();
+                    let mut clipboard = Clipboard::new().unwrap();
+                    clipboard.set_text(seed.as_str()).expect("Failed to copy");
+                    hold_n_exit();
                 }
             }
         }
@@ -388,11 +392,15 @@ pub mod Commands {
                     let encrypted_encoded_note = general_purpose::STANDARD.encode(&key_w_pass);
                     Entry{ alias: alias.to_string(), entry_type: EntryType::Note,category:cname.to_string(), username: None, password: None, file_path: None, notes: Some(encrypted_encoded_note), seed_phrase:None, aes_key:aes_key }
                 }
-                /*
                 "seedphrase" => {
-                    // implement seedphrase input
+                    print!("Enter Seed Phrase / 2FA Recovery : ");
+                    io::stdout().flush().unwrap();
+                    let password = rpassword::read_password().expect("Failed to read note");
+                    let aes_key = generate_aes_session_key();
+                    let key_w_seedphrase = encrypt_string_with_aes(password.as_str(), &aes_key).unwrap();
+                    let encrypted_encoded_seedphrase = general_purpose::STANDARD.encode(&key_w_seedphrase);
+                    Entry{ alias: alias.to_string(), entry_type: EntryType::Seed,category:cname.to_string(), username: None, password: None, file_path: None, notes: None, seed_phrase: Some(encrypted_encoded_seedphrase), aes_key:aes_key }
                 }
-                */
                 _ => {
                     println!("Invalid type entered. Exiting.");
                     exit(1);
