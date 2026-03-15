@@ -272,7 +272,12 @@ pub mod Commands {
                     hold_n_exit();
                 }
                 EntryType::Note => {
-                    println!("Implement later");
+                    let notes_blob = general_purpose::STANDARD
+                        .decode(secret_data_struct.notes.unwrap()).map_err((|e| format!("Base64 decode failed: {e}"))).unwrap();
+                    let notes = decrypt_string_with_aes(&notes_blob, &secret_data_struct.aes_key).unwrap();
+                    let mut clipboard = Clipboard::new().unwrap();
+                    clipboard.set_text(notes.as_str()).expect("Failed to copy");
+                    hold_n_exit();
                 }
                 EntryType::File => {
                     println!("File implementation");
@@ -373,10 +378,17 @@ pub mod Commands {
                     std::fs::write(&encrypted_file_path, encrypted).expect("Failed to write file");
                     Entry { alias: alias.to_string(), entry_type: EntryType::File, category: cname.to_string(), username: None, password: None, file_path: Some(file_path), notes: None, seed_phrase:None, aes_key:aes_key }
                 }
-                /*
+                
                 "note" => {
-                    // implement note type input
+                    print!("Enter Note: ");
+                    io::stdout().flush().unwrap();
+                    let password = rpassword::read_password().expect("Failed to read note");
+                    let aes_key = generate_aes_session_key();
+                    let key_w_pass = encrypt_string_with_aes(password.as_str(), &aes_key).unwrap();
+                    let encrypted_encoded_note = general_purpose::STANDARD.encode(&key_w_pass);
+                    Entry{ alias: alias.to_string(), entry_type: EntryType::Note,category:cname.to_string(), username: None, password: None, file_path: None, notes: Some(encrypted_encoded_note), seed_phrase:None, aes_key:aes_key }
                 }
+                /*
                 "seedphrase" => {
                     // implement seedphrase input
                 }
