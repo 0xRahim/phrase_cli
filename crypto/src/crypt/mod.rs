@@ -18,8 +18,7 @@ pub use aes::{
     generate_aes_session_key,
 };
 pub use keys::{
-    decrypt_private_key_with_mpass,
-    encrypt_private_key,
+    decrypt_blob_with_asc_key,
     generate_key_pairs,
 };
 pub use session_key::{

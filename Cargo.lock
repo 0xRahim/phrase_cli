@@ -529,11 +529,13 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "ed25519-dalek",
  "hkdf",
  "pgp",
  "rand",
  "sha2",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
