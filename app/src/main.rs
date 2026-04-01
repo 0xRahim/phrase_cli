@@ -61,6 +61,7 @@ enum CredAction {
 }
 
 fn main() {
+    ui::clear_terminal();
     ui::print_banner();
 
     let cli = Cli::parse();

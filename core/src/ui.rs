@@ -4,6 +4,12 @@
 // Import with: use crate::ui;  (or wherever this module lives)
 // ─────────────────────────────────────────────────────────────────────────────
 
+
+// ─── Imports
+use std::io::{self, Write};
+// ─────────────────────────────────────────────────────────────────────────────
+
+
 // ── Raw ANSI codes ────────────────────────────────────────────────────────────
 pub const RESET:   &str = "\x1b[0m";
 pub const BOLD:    &str = "\x1b[1m";
@@ -114,4 +120,10 @@ pub fn kv_masked(key: &str, notice: &str) {
 /// Prompt prefix — used before interactive password/enter prompts.
 pub fn prompt_prefix(label: &str) {
     print!("{BYELLOW}{BOLD}  {ARROW}  {RESET}{BOLD}{label}{RESET} ");
+}
+
+// Clear terminal screen - used to clean the terminal texts 
+pub fn clear_terminal() {
+    print!("\x1B[2J\x1B[1;1H");
+    io::stdout().flush().unwrap();
 }
