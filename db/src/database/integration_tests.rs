@@ -31,6 +31,7 @@ mod integration_tests {
             vault_name:      name.to_owned(),
             public_key:      format!("pub_{name}"),
             enc_private_key: format!("enc_{name}"),
+            is_default:      false
         }
     }
 
@@ -66,7 +67,7 @@ mod integration_tests {
         assert_eq!(list[0].vault_id, id);
 
         // UPDATE
-        f.db.update_vault(&id, "RenamedVault", "new_pub", "new_enc").unwrap();
+        f.db.update_vault(&id, "RenamedVault", "new_pub", "new_enc", false).unwrap();
         let updated = f.db.get_vault(&id).unwrap();
         assert_eq!(updated.vault_name, "RenamedVault");
 
