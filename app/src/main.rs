@@ -43,9 +43,7 @@ fn main() {
                     _ => "Vault name is required for this action.",
                 };
 
-                ui::failure(msg);
-                println!();
-                std::process::exit(1);
+                exit_with_error(&msg);
             }
 
             match args.action.as_str() {
@@ -88,9 +86,7 @@ fn main() {
                     _ => "Entry name is required for this action.",
                 };
 
-                ui::failure(msg);
-                println!();
-                std::process::exit(1);
+                exit_with_error(&msg);
             }
 
             // Optional: inform user if default category is used
@@ -109,17 +105,21 @@ fn main() {
         }
 
         other => {
-            ui::failure(&format!(
+            let msg = &format!(
                 "Unknown page '{other}'. Try: vault | category | cred"
-            ));
-            println!();
-            std::process::exit(1);
+            );
+            exit_with_error(&msg);
         }
     }
 }
 
 fn unknown_action(page: &str, action: &str) {
-    ui::failure(&format!("Unknown action '{action}' for '{page}'"));
+    let msg = format!("Unknown action '{action}' for '{page}'");
+    exit_with_error(&msg);
+}
+
+fn exit_with_error(msg: &str) -> ! {
+    ui::failure(msg);
     println!();
     std::process::exit(1);
 }
