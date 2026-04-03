@@ -4,6 +4,8 @@ Phrase is a local-first password manager written in Rust.
 
 No cloud. No accounts. Your vault stays on your machine.
 
+![banner](https://raw.githubusercontent.com/0xRahim/phrase_cli/refs/heads/main/.useless/ss.png)
+
 ## Install
 
 ```bash
