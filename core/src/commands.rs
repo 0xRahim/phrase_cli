@@ -3,7 +3,7 @@ pub mod Commands {
     // ─── Vault ───────────────────────────────────────────────────────────────────
 
     pub mod vault {
-        use crate::ui;
+        use crate::{paths, ui};
         use crypto::crypt::keys::generate_key_pairs;
         use db::database::NewVault;
         use rpassword::read_password;
@@ -16,8 +16,11 @@ pub mod Commands {
         }
 
         fn open_db() -> db::database::Database {
-            db::database::Database::open("/tmp/test.db")
-                .unwrap_or_else(|e| die(&format!("Failed to open database: {e}")))
+            let db_path = paths::db_path();
+            let db_path_str = db_path.to_str()
+                .unwrap_or_else(|| die("Database path contains invalid UTF-8"));
+            db::database::Database::open(db_path_str)
+                .unwrap_or_else(|e| die(&format!("Failed to open database at {}: {e}", db_path.display())))
         }
 
         /// Interactively collects name, email, and a confirmed master password,
@@ -111,7 +114,7 @@ pub mod Commands {
             println!();
 
             if vaults.is_empty() {
-                ui::info("No vaults found. Run `phrase vault new <name>` to create one.");
+                ui::info("No vaults found. Run `phrase vault new <n>` to create one.");
             } else {
                 for v in &vaults {
                     if v.is_default {
@@ -213,7 +216,7 @@ pub mod Commands {
     // ─── Entry ───────────────────────────────────────────────────────────────────
 
     pub mod entry {
-        use crate::ui;
+        use crate::{paths, ui};
         use arboard::Clipboard;
         use base64::{engine::general_purpose, Engine as _};
         use crypto::crypt::{
@@ -264,8 +267,11 @@ pub mod Commands {
         }
 
         fn open_db() -> db::database::Database {
-            db::database::Database::open("/tmp/test.db")
-                .unwrap_or_else(|e| die(&format!("Failed to open database: {e}")))
+            let db_path = paths::db_path();
+            let db_path_str = db_path.to_str()
+                .unwrap_or_else(|| die("Database path contains invalid UTF-8"));
+            db::database::Database::open(db_path_str)
+                .unwrap_or_else(|e| die(&format!("Failed to open database at {}: {e}", db_path.display())))
         }
 
         // ── Public commands ───────────────────────────────────────────────────────
@@ -398,13 +404,14 @@ pub mod Commands {
 
             let vault = match db.get_default_vault() {
                 Ok(v) => v,
-                Err(_) => die("No default vault set. Run `phrase vault use <name>` first."),
+                Err(_) => die("No default vault set. Run `phrase vault use <n>` first."),
             };
 
-            let x25519_priv = match private_key_asc_to_x25519_bytes(&vault.enc_private_key, &mpass) {
-                Ok(k) => k,
-                Err(_) => die("Wrong master password or corrupted private key"),
-            };
+            let x25519_priv =
+                match private_key_asc_to_x25519_bytes(&vault.enc_private_key, &mpass) {
+                    Ok(k) => k,
+                    Err(_) => die("Wrong master password or corrupted private key"),
+                };
 
             let entry_id = match db.get_entry_by_alias(alias) {
                 Ok(e) => e.id,
@@ -432,7 +439,7 @@ pub mod Commands {
             let db = open_db();
             let vault = match db.get_default_vault() {
                 Ok(v) => v,
-                Err(_) => die("No default vault set. Run `phrase vault use <name>` first."),
+                Err(_) => die("No default vault set. Run `phrase vault use <n>` first."),
             };
             let x25519_pub = match public_key_asc_to_x25519_bytes(&vault.public_key) {
                 Ok(k) => k,
@@ -457,7 +464,7 @@ pub mod Commands {
             match entry.entry_type {
                 EntryType::Login => {
                     let uname_blob = b64_decode(secret.username.as_deref().unwrap_or(""));
-                    let pass_blob  = b64_decode(secret.password.as_deref().unwrap_or(""));
+                    let pass_blob = b64_decode(secret.password.as_deref().unwrap_or(""));
 
                     let username = match decrypt_string_with_aes(&uname_blob, &aes_key) {
                         Ok(s) => s,
@@ -507,22 +514,30 @@ pub mod Commands {
                     };
                     let enc_data = match std::fs::read(&enc_path) {
                         Ok(d) => d,
-                        Err(e) => die(&format!("Failed to read encrypted file '{enc_path}': {e}")),
+                        Err(e) => die(&format!(
+                            "Failed to read encrypted file '{}': {e}",
+                            enc_path
+                        )),
                     };
                     let dec_data = match decrypt_bytes_with_aes(&enc_data, &aes_key) {
                         Ok(d) => d,
                         Err(e) => die(&format!("Failed to decrypt file: {e}")),
                     };
-                    let dec_path = enc_path.replace(".phrased", "");
+
+                    // Decrypted file lands next to the encrypted one in uploads/
+                    let dec_path = paths::decrypted_file_path(&enc_path);
                     if let Err(e) = std::fs::write(&dec_path, &dec_data) {
-                        die(&format!("Failed to write decrypted file to '{dec_path}': {e}"));
+                        die(&format!(
+                            "Failed to write decrypted file to '{}': {e}",
+                            dec_path.display()
+                        ));
                     }
 
                     println!(
                         "{}  type{} {}File{}",
                         ui::GRAY, ui::RESET, ui::BCYAN, ui::RESET
                     );
-                    ui::kv("decrypted to", &dec_path);
+                    ui::kv("decrypted to", &dec_path.display().to_string());
                     ui::separator();
                     println!();
                 }
@@ -551,8 +566,7 @@ pub mod Commands {
         fn collect_entry_inputs(alias: &str, cname: &str) -> Entry {
             print!(
                 "{}{}  ›  {}{}Type {}{}[login / file / note / seedphrase]{}  ",
-                ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET,
-                ui::GRAY, ui::RESET
+                ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET, ui::GRAY, ui::RESET
             );
             io::stdout().flush().unwrap_or_else(|e| die(&format!("Flush failed: {e}")));
             let mut raw = String::new();
@@ -562,7 +576,10 @@ pub mod Commands {
 
             match raw.trim() {
                 "" | "login" => {
-                    print!("{}{}  ›  {}{}Username  {}", ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET);
+                    print!(
+                        "{}{}  ›  {}{}Username  {}",
+                        ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET
+                    );
                     io::stdout().flush().unwrap_or_else(|e| die(&format!("Flush failed: {e}")));
                     let mut uname = String::new();
                     io::stdin()
@@ -570,7 +587,10 @@ pub mod Commands {
                         .unwrap_or_else(|e| die(&format!("Failed to read username: {e}")));
                     let uname = uname.trim().to_string();
 
-                    print!("{}{}  ›  {}{}Password  {}", ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET);
+                    print!(
+                        "{}{}  ›  {}{}Password  {}",
+                        ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET
+                    );
                     io::stdout().flush().unwrap_or_else(|e| die(&format!("Flush failed: {e}")));
                     let password = read_password()
                         .unwrap_or_else(|e| die(&format!("Failed to read password: {e}")));
@@ -590,7 +610,10 @@ pub mod Commands {
                 }
 
                 "file" => {
-                    print!("{}{}  ›  {}{}File path  {}", ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET);
+                    print!(
+                        "{}{}  ›  {}{}File path  {}",
+                        ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET
+                    );
                     io::stdout().flush().unwrap_or_else(|e| die(&format!("Flush failed: {e}")));
                     let mut path = String::new();
                     io::stdin()
@@ -613,12 +636,17 @@ pub mod Commands {
                         Err(e) => die(&format!("Encryption failed: {e}")),
                     };
 
-                    let enc_path = format!("{path}.phrased");
+                    // Store in the centralised uploads directory, not next to the source file
+                    let enc_path = paths::encrypted_file_path(&path);
                     if let Err(e) = std::fs::write(&enc_path, &encrypted) {
-                        die(&format!("Failed to write encrypted file to '{enc_path}': {e}"));
+                        die(&format!(
+                            "Failed to write encrypted file to '{}': {e}",
+                            enc_path.display()
+                        ));
                     }
 
-                    ui::kv("encrypted to", &enc_path);
+                    let enc_path_str = enc_path.display().to_string();
+                    ui::kv("encrypted to", &enc_path_str);
 
                     Entry {
                         alias: alias.into(),
@@ -626,7 +654,7 @@ pub mod Commands {
                         category: cname.into(),
                         username: None,
                         password: None,
-                        file_path: Some(enc_path),
+                        file_path: Some(enc_path_str),
                         notes: None,
                         seed_phrase: None,
                         aes_key: wrap_aes_key(aes_key),
@@ -634,7 +662,10 @@ pub mod Commands {
                 }
 
                 "note" => {
-                    print!("{}{}  ›  {}{}Note  {}", ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET);
+                    print!(
+                        "{}{}  ›  {}{}Note  {}",
+                        ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET
+                    );
                     io::stdout().flush().unwrap_or_else(|e| die(&format!("Flush failed: {e}")));
                     let note = read_password()
                         .unwrap_or_else(|e| die(&format!("Failed to read note: {e}")));
@@ -654,7 +685,10 @@ pub mod Commands {
                 }
 
                 "seedphrase" => {
-                    print!("{}{}  ›  {}{}Seed phrase / 2FA recovery  {}", ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET);
+                    print!(
+                        "{}{}  ›  {}{}Seed phrase / 2FA recovery  {}",
+                        ui::BYELLOW, ui::BOLD, ui::RESET, ui::BOLD, ui::RESET
+                    );
                     io::stdout().flush().unwrap_or_else(|e| die(&format!("Flush failed: {e}")));
                     let seed = read_password()
                         .unwrap_or_else(|e| die(&format!("Failed to read seed phrase: {e}")));
@@ -675,7 +709,9 @@ pub mod Commands {
 
                 other => {
                     println!();
-                    die(&format!("Unknown entry type '{other}'. Expected: login, file, note, seedphrase"));
+                    die(&format!(
+                        "Unknown entry type '{other}'. Expected: login, file, note, seedphrase"
+                    ));
                 }
             }
         }
@@ -686,7 +722,7 @@ pub mod Commands {
             let db = open_db();
             match db.get_default_vault() {
                 Ok(v) => v.vault_id.to_string(),
-                Err(_) => die("No default vault set. Run `phrase vault use <name>` first."),
+                Err(_) => die("No default vault set. Run `phrase vault use <n>` first."),
             }
         }
 
