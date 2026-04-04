@@ -9,8 +9,8 @@ No cloud. No accounts. Your vault stays on your machine.
 ## Install
 
 ```bash
-git clone https://github.com/0xRahim/phrase.git
-cd phrase
+git clone https://github.com/0xRahim/phrase_cli.git
+cd phrase_cli
 cargo build --release
 ```
 
