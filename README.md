@@ -7,7 +7,8 @@ No cloud. No accounts. Your vault stays on your machine.
 ![banner](https://raw.githubusercontent.com/0xRahim/phrase_cli/refs/heads/main/.useless/ss.png)
 
 ## Install
-
+- Download Linux Binary From [Releases](https://github.com/0xRahim/phrase_cli/releases/tag/linux)
+- Or Just Build Yourself
 ```bash
 git clone https://github.com/0xRahim/phrase_cli.git
 cd phrase_cli
