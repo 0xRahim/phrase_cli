@@ -1,6 +1,6 @@
 # Phrase
 
-Phrase is a local-first password manager written in Rust.
+Phrase is a local-first password manager written in Rust with hybrid encryption architecture.
 
 No cloud. No accounts. Your vault stays on your machine.
 
